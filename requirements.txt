@@ -10,3 +10,5 @@ pydantic
 supabase
 pdf2image
 poppler-utils
+streamlit
+pandas

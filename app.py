@@ -1,5 +1,6 @@
 import os
 import json
+import time
 from io import BytesIO
 from datetime import datetime, timezone, timedelta
 import streamlit as st
@@ -37,33 +38,36 @@ def init_supabase() -> Client | None:
     if SUPABASE_URL and SUPABASE_KEY:
         try:
             return create_client(SUPABASE_URL, SUPABASE_KEY)
-        except Exception as e:
+        except Exception:
             return None
     return None
 
 supabase = init_supabase()
 
 # ---------------------------------------------------------
-# 1. Gemini Vision OCR 스키마
+# 1. Gemini Vision OCR 스키마 (다중 페이지 일괄 추출 지원)
 # ---------------------------------------------------------
 class SurveyExtraction(BaseModel):
-    이름: str = Field(description="학생 이름")
-    마음날씨: str = Field(description="'아주 맑음', '구름 조금', '비 옴', '천둥 번개' 중 하나")
-    현재기분: str = Field(description="'기분이 좋아요', '그냥 보통이에요', '조금 지쳐요', '속상해요', '화가 나요' 중 하나")
-    깊이있는마음: str = Field(description="요즘 나의 마음과 가장 가까운 문장")
-    주요고민: list[str] = Field(description="체크된 고민 목록")
-    짜증순간: list[str] = Field(description="짜증나는 순간 목록")
-    필요한것: list[str] = Field(description="필요한 것 목록")
-    친한친구: str = Field(description="가장 친한 친구 이름 (쉼표 구분)")
-    자주노는친구: str = Field(description="자주 함께 노는 친구 이름 (쉼표 구분)")
-    친해지고싶은친구: str = Field(description="친해지고 싶은 친구 이름 (쉼표 구분)")
-    멀리있는친구: str = Field(description="멀리 있는 친구 이름 (쉼표 구분)")
-    관계어려움: list[str] = Field(description="친구 관계 어려움 항목")
-    점수_즐거움: int = Field(description="1~5점")
-    점수_힘든친구: int = Field(description="1~5점")
-    점수_상담대상: int = Field(description="1~5점")
-    비밀편지여부: str = Field(description="'비밀이에요!' 또는 '괜찮아요'")
-    하고싶은말: str = Field(description="서술형 텍스트 전체")
+    이름: str = Field(description="학생 이름 (미기재 시 '미기재')") #[cite: 1, 2, 3]
+    마음날씨: str = Field(description="'아주 맑음', '구름 조금', '비 옴', '천둥 번개' 중 하나") #[cite: 3]
+    현재기분: str = Field(description="'기분이 좋아요', '그냥 보통이에요', '조금 지쳐요', '속상해요', '화가 나요' 중 하나") #[cite: 1]
+    깊이있는마음: str = Field(description="요즘 나의 마음과 가장 가까운 문장") #[cite: 1]
+    주요고민: list[str] = Field(description="체크된 고민 목록") #[cite: 1, 3]
+    짜증순간: list[str] = Field(description="짜증나는 순간 목록") #[cite: 1]
+    필요한것: list[str] = Field(description="필요한 것 목록") #[cite: 1]
+    친한친구: str = Field(description="가장 친한 친구 이름 (쉼표 구분)") #[cite: 2, 3]
+    자주노는친구: str = Field(description="자주 함께 노는 친구 이름 (쉼표 구분)") #[cite: 2, 3]
+    친해지고싶은친구: str = Field(description="친해지고 싶은 친구 이름 (쉼표 구분)") #[cite: 2, 3]
+    멀리있는친구: str = Field(description="멀리 있는 친구 이름 (쉼표 구분)") #[cite: 2, 3]
+    관계어려움: list[str] = Field(description="친구 관계 어려움 항목") #[cite: 2]
+    점수_즐거움: int = Field(description="1~5점 (없으면 4)") #[cite: 3]
+    점수_힘든친구: int = Field(description="1~5점 (없으면 1)") #[cite: 3]
+    점수_상담대상: int = Field(description="1~5점 (없으면 4)") #[cite: 3]
+    비밀편지여부: str = Field(description="'비밀이에요!' 또는 '괜찮아요'") #[cite: 2, 3]
+    하고싶은말: str = Field(description="서술형 텍스트 전체") #[cite: 1, 2, 3]
+
+class BatchSurveyExtraction(BaseModel):
+    results: list[SurveyExtraction] = Field(description="업로드된 각 설문지 이미지 순서대로 추출된 결과 리스트")
 
 # ---------------------------------------------------------
 # 2. DB 연동 함수
@@ -258,51 +262,51 @@ if app_mode == "👦 1. 학생용 설문 참여":
             other_friends = [name for name in student_list if name != my_name]
 
             with st.form("student_survey_form", clear_on_submit=True):
-                st.subheader("2️⃣ 지금 나의 마음 날씨는 어떤가요?")
+                st.subheader("2️⃣ 지금 나의 마음 날씨는 어떤가요?") #[cite: 3]
                 c_m1, c_m2 = st.columns(2)
                 with c_m1:
-                    weather_choice = st.radio("날씨 선택", ["☀️ 아주 맑음", "⛅ 구름 조금", "🌧️ 비 옴", "⛈️ 천둥 번개"])
-                    mood_choice = st.radio("기분 선택", ["😄 기분이 좋아요", "🙂 그냥 보통이에요", "😐 조금 지쳐요", "😢 속상해요", "😡 화가 나요"])
+                    weather_choice = st.radio("날씨 선택", ["☀️ 아주 맑음", "⛅ 구름 조금", "🌧️ 비 옴", "⛈️ 천둥 번개"]) #[cite: 3]
+                    mood_choice = st.radio("기분 선택", ["😄 기분이 좋아요", "🙂 그냥 보통이에요", "😐 조금 지쳐요", "😢 속상해요", "😡 화가 나요"]) #[cite: 1]
                 with c_m2:
                     deep_choice = st.radio("마음과 가까운 것", [
-                        "평소처럼 괜찮고, 별로 힘든 게 없어요.",
-                        "가끔씩 짜증이 나거나 기분이 좀 가라앉아요.",
-                        "자주 짜증이 나고, 마음이 불안해요.",
-                        "많이 힘들고, 울고 싶을 때가 있어요.",
-                        "기분이 계속 안 좋고, 아무것도 하기 싫어요."
+                        "평소처럼 괜찮고, 별로 힘든 게 없어요.", #[cite: 1]
+                        "가끔씩 짜증이 나거나 기분이 좀 가라앉아요.", #[cite: 1]
+                        "자주 짜증이 나고, 마음이 불안해요.", #[cite: 1]
+                        "많이 힘들고, 울고 싶을 때가 있어요.", #[cite: 1]
+                        "기분이 계속 안 좋고, 아무것도 하기 싫어요." #[cite: 1]
                     ])
 
                 st.divider()
-                st.subheader("3️⃣ 요즘 힘들거나 짜증나는 일")
+                st.subheader("3️⃣ 요즘 힘들거나 짜증나는 일") #[cite: 1, 3]
                 c_w1, c_w2, c_w3 = st.columns(3)
                 with c_w1:
-                    worries_sel = st.multiselect("걱정되는 것", ["공부가 어렵거나 성적이 걱정돼요.", "숙제나 준비물을 챙기기 힘들어요.", "친구 관계 때문에 속상해요.", "선생님이나 부모님께 혼나는 것이 걱정돼요.", "몸이 피곤하고 에너지가 없어요."])
-                    worry_etc = st.text_input("기타 힘든 점")
+                    worries_sel = st.multiselect("걱정되는 것", ["공부가 어렵거나 성적이 걱정돼요.", "숙제나 준비물을 챙기기 힘들어요.", "친구 관계 때문에 속상해요.", "선생님이나 부모님께 혼나는 것이 걱정돼요.", "몸이 피곤하고 에너지가 없어요."]) #[cite: 1, 3]
+                    worry_etc = st.text_input("기타 힘든 점") #[cite: 1, 3]
                 with c_w2:
-                    moments_sel = st.multiselect("짜증나는 순간", ["공부할 때", "숙제나 준비를 할 때", "친구들과 있을 때", "쉬는 시간이나 놀이 시간에", "식사할 때", "집에 있을 때"])
+                    moments_sel = st.multiselect("짜증나는 순간", ["공부할 때", "숙제나 준비를 할 때", "친구들과 있을 때", "쉬는 시간이나 놀이 시간에", "식사할 때", "집에 있을 때"]) #[cite: 1]
                 with c_w3:
-                    needs_sel = st.multiselect("필요한 것", ["따뜻한 말과 격려", "친구와 더 많은 시간", "공부에 대한 도움", "충분한 휴식과 수면", "좋아하는 활동(놀이, 취미 등)", "선생님과 이야기하기"])
+                    needs_sel = st.multiselect("필요한 것", ["따뜻한 말과 격려", "친구와 더 많은 시간", "공부에 대한 도움", "충분한 휴식과 수면", "좋아하는 활동(놀이, 취미 등)", "선생님과 이야기하기"]) #[cite: 1]
 
                 st.divider()
-                st.subheader("4️⃣ 친구 관계 이야기")
+                st.subheader("4️⃣ 친구 관계 이야기") #[cite: 2, 3]
                 c_f1, c_f2 = st.columns(2)
                 with c_f1:
-                    close_friends = st.multiselect("💖 친하게 지내는 친구", options=other_friends)
-                    play_friends = st.multiselect("🏃 자주 함께 노는 친구", options=other_friends)
+                    close_friends = st.multiselect("💖 친하게 지내는 친구", options=other_friends) #[cite: 2, 3]
+                    play_friends = st.multiselect("🏃 자주 함께 노는 친구", options=other_friends) #[cite: 2, 3]
                 with c_f2:
-                    want_friends = st.multiselect("🌟 더 친해지고 싶은 친구", options=other_friends)
-                    distant_friends = st.multiselect("💭 조금 멀리 있는(어려운) 친구", options=other_friends)
+                    want_friends = st.multiselect("🌟 더 친해지고 싶은 친구", options=other_friends) #[cite: 2, 3]
+                    distant_friends = st.multiselect("💭 조금 멀리 있는(어려운) 친구", options=other_friends) #[cite: 2, 3]
 
-                rel_diff_sel = st.multiselect("친구 관계 어려움", ["특별히 어려운 점은 없어요.", "놀이에 끼고 싶었지만 끼지 못했어요.", "친구들이 내 말을 잘 들어주지 않아요.", "친구와 자주 다투거나 오해가 생겨요.", "혼자 있는 시간이 많아요.", "친구 때문에 속상하지만 말하기 어려워요."])
+                rel_diff_sel = st.multiselect("친구 관계 어려움", ["특별히 어려운 점은 없어요.", "놀이에 끼고 싶었지만 끼지 못했어요.", "친구들이 내 말을 잘 들어주지 않아요.", "친구와 자주 다투거나 오해가 생겨요.", "혼자 있는 시간이 많아요.", "친구 때문에 속상하지만 말하기 어려워요."]) #[cite: 2]
 
                 sc1, sc2, sc3 = st.columns(3)
-                with sc1: s_fun = st.slider("1. 함께 노는 것이 즐겁다", 1, 5, 4)
-                with sc2: s_hard = st.slider("2. 나를 힘들게 하는 친구가 있다", 1, 5, 1)
-                with sc3: s_talk = st.slider("3. 이야기할 대상이 있다", 1, 5, 4)
+                with sc1: s_fun = st.slider("1. 함께 노는 것이 즐겁다", 1, 5, 4) #[cite: 3]
+                with sc2: s_hard = st.slider("2. 나를 힘들게 하는 친구가 있다", 1, 5, 1) #[cite: 3]
+                with sc3: s_talk = st.slider("3. 이야기할 대상이 있다", 1, 5, 4) #[cite: 3]
 
                 st.divider()
-                free_text = st.text_area("하고 싶은 말 / 자랑 / 고민")
-                secret_opt = st.radio("비밀 편지 여부", ["😊 괜찮아요", "🔒 비밀이에요!"])
+                free_text = st.text_area("하고 싶은 말 / 자랑 / 고민") #[cite: 1, 2, 3]
+                secret_opt = st.radio("비밀 편지 여부", ["😊 괜찮아요", "🔒 비밀이에요!"]) #[cite: 2, 3]
 
                 if st.form_submit_button("💌 제출하기", use_container_width=True):
                     if worry_etc.strip(): worries_sel.append(worry_etc.strip())
@@ -334,15 +338,25 @@ if app_mode == "👦 1. 학생용 설문 참여":
         st.warning("⚠️ 등록된 학생 명렬표가 없습니다. [📋 4. 엑셀로 명렬표 일괄 등록] 메뉴에서 먼저 명렬표를 등록해주세요.")
 
 # =========================================================
-# [모드 2] 종이 설문지 AI 스캔 (PDF 및 이미지 지원)
+# [모드 2] 종이 설문지 AI 스캔 (배치 처리 & 쿼터 절약형)
 # =========================================================
 elif app_mode == "📸 2. 종이 설문지 AI 스캔 (교사용)":
     if require_teacher_auth():
-        st.title("📸 종이 설문지 AI 자동 인식 (PDF & 이미지 OCR)")
-        st.markdown("복합기로 스캔한 **PDF 파일** 또는 **이미지 파일(png, jpg)**을 업로드하면, PyMuPDF를 통해 페이지별 이미지로 자동 변환되어 AI가 일괄 판독합니다.")
+        st.title("📸 종이 설문지 AI 자동 인식 (묶음 배치 OCR)")
+        st.info("💡 **무료 API 한도(일 20회 제한) 해결 완료!** 이제 한 장씩 보내지 않고 **10장씩 묶어서 단 1번의 API 호출**로 처리하므로, 60장짜리 PDF도 단 6번의 요청만으로 한도 초과 없이 빠르게 판독합니다.")
         
-        ocr_round = st.text_input("설문 회차", value=st.session_state["active_round"])
-        api_k = st.text_input("Gemini API Key", value=GEMINI_API_KEY, type="password")
+        c_opt1, c_opt2, c_opt3 = st.columns(3)
+        with c_opt1:
+            ocr_round = st.text_input("설문 회차", value=st.session_state["active_round"])
+        with c_opt2:
+            model_name = st.selectbox(
+                "사용할 AI 모델 (한도 초과 시 다른 모델 선택)",
+                ["gemini-3.8-flash", "gemini-2.0-flash", "gemini-1.5-flash"]
+            )
+        with c_opt3:
+            batch_size = st.slider("1회 호출당 묶음 페이지 수 (Batch Size)", min_value=5, max_value=15, value=10)
+
+        api_k = st.text_input("Gemini API Key (기존 키가 20회 다 찼다면 새 키 입력 가능)", value=GEMINI_API_KEY, type="password")
         
         uploaded_files = st.file_uploader(
             "설문지 파일 업로드 (PDF 또는 이미지 다중 선택 가능)",
@@ -350,62 +364,120 @@ elif app_mode == "📸 2. 종이 설문지 AI 스캔 (교사용)":
             accept_multiple_files=True
         )
 
-        if uploaded_files and st.button("🤖 AI 판독 시작", type="primary"):
-            if not api_k:
-                st.error("API 키를 입력해주세요.")
-            else:
-                all_images_to_process = []
-                for f in uploaded_files:
-                    file_bytes = f.getvalue()
-                    if f.name.lower().endswith(".pdf"):
-                        try:
-                            doc = fitz.open(stream=file_bytes, filetype="pdf")
-                            for page in doc:
-                                pix = page.get_pixmap(dpi=150)
-                                all_images_to_process.append(pix.tobytes("jpeg"))
-                        except Exception as e:
-                            st.error(f"PDF 변환 오류 ({f.name}): {e}")
-                    else:
-                        all_images_to_process.append(file_bytes)
+        if uploaded_files:
+            # 전체 페이지 수 미리 확인 및 구간 지정 기능
+            all_images_to_process = []
+            for f in uploaded_files:
+                file_bytes = f.getvalue()
+                if f.name.lower().endswith(".pdf"):
+                    try:
+                        doc = fitz.open(stream=file_bytes, filetype="pdf")
+                        for page in doc:
+                            pix = page.get_pixmap(dpi=130)
+                            all_images_to_process.append(pix.tobytes("jpeg"))
+                    except Exception as e:
+                        st.error(f"PDF 변환 오류 ({f.name}): {e}")
+                else:
+                    all_images_to_process.append(file_bytes)
 
-                if all_images_to_process:
+            total_pages = len(all_images_to_process)
+            st.write(f"📄 **총 감지된 페이지 수:** {total_pages}페이지 (예상 API 호출 횟수: **{(total_pages - 1) // batch_size + 1}회**)")
+
+            page_range = st.slider(
+                "판독할 페이지 범위 선택 (특정 구간만 이어서 판독할 때 조절하세요)",
+                min_value=1, max_value=max(1, total_pages), value=(1, max(1, total_pages))
+            )
+
+            if st.button("🤖 묶음 AI 판독 시작", type="primary"):
+                if not api_k:
+                    st.error("API 키를 입력해주세요.")
+                else:
+                    target_images = all_images_to_process[page_range[0]-1 : page_range[1]]
                     rows = []
                     prog = st.progress(0)
+                    status_box = st.empty()
                     client = genai.Client(api_key=api_k)
                     
-                    for i, img_bytes in enumerate(all_images_to_process):
-                        try:
-                            prompt = f"초등학생 설문지입니다. 우리 반 명단[{', '.join(student_list)}]을 참고하여 오타 없이 학생 이름을 매칭하고 JSON으로 추출하세요."
-                            res = client.models.generate_content(
-                                model="gemini-3.8-flash",  # 최신 권장 모델로 업데이트
-                                contents=[types.Part.from_bytes(data=img_bytes, mime_type="image/jpeg"), prompt],
-                                config=types.GenerateContentConfig(response_mime_type="application/json", response_schema=SurveyExtraction, temperature=0.1)
-                            )
-                            d = json.loads(res.text)
-                            rows.append({
-                                "class_code": active_class, "survey_round": ocr_round, "이름": d.get("이름"),
-                                "마음날씨": d.get("마음날씨"), "현재기분": d.get("현재기분"), "깊이있는마음": d.get("깊이있는마음"),
-                                "주요고민": ", ".join(d.get("주요고민", [])), "짜증순간": ", ".join(d.get("짜증순간", [])),
-                                "필요한것": ", ".join(d.get("필요한것", [])), "친한친구": d.get("친한친구"),
-                                "자주노는친구": d.get("자주노는친구"), "친해지고싶은친구": d.get("친해지고싶은친구"),
-                                "멀리있는친구": d.get("멀리있는친구"), "관계어려움": ", ".join(d.get("관계어려움", [])),
-                                "점수_즐거움": d.get("점수_즐거움", 4), "점수_힘든친구": d.get("점수_힘든친구", 1),
-                                "점수_상담대상": d.get("점수_상담대상", 4), "비밀편지여부": d.get("비밀편지여부", "괜찮아요"),
-                                "하고싶은말": d.get("하고싶은말"), "제출방식": "AI 스캔(PDF/이미지)", "제출일시": datetime.now(KST).isoformat()
-                            })
-                        except Exception as e:
-                            st.warning(f"{i+1}번째 페이지 판독 중 오류 발생: {e}")
-                        prog.progress((i + 1) / len(all_images_to_process))
+                    total_batches = (len(target_images) - 1) // batch_size + 1
 
-                    st.session_state["ocr_df"] = pd.DataFrame(rows)
-                    st.success("✅ 모든 페이지 판독이 완료되었습니다! 아래 표에서 검수 후 저장하세요.")
+                    for b_idx in range(total_batches):
+                        batch_imgs = target_images[b_idx * batch_size : (b_idx + 1) * batch_size]
+                        start_p = page_range[0] + b_idx * batch_size
+                        end_p = start_p + len(batch_imgs) - 1
+                        status_box.info(f"🔄 [{b_idx+1}/{total_batches} 묶음] {start_p}~{end_p}페이지 일괄 분석 중...")
+
+                        contents_payload = [
+                            types.Part.from_bytes(data=img_b, mime_type="image/jpeg")
+                            for img_b in batch_imgs
+                        ]
+                        prompt = (
+                            f"제공된 {len(batch_imgs)}장의 초등학생 설문지 이미지를 순서대로 빠짐없이 분석하세요. "
+                            f"우리 반 명단[{', '.join(student_list)}]을 참고하여 손글씨 이름을 정확히 매칭하고, "
+                            f"results 리스트에 각 페이지의 추출 결과를 담아 JSON으로 반환하세요."
+                        )
+                        contents_payload.append(prompt)
+
+                        # 503 또는 일시적 오류 발생 시 최대 3회 자동 재시도
+                        success_batch = False
+                        for attempt in range(3):
+                            try:
+                                res = client.models.generate_content(
+                                    model=model_name,
+                                    contents=contents_payload,
+                                    config=types.GenerateContentConfig(
+                                        response_mime_type="application/json",
+                                        response_schema=BatchSurveyExtraction,
+                                        temperature=0.1
+                                    )
+                                )
+                                parsed_batch = json.loads(res.text).get("results", [])
+                                for d in parsed_batch:
+                                    rows.append({
+                                        "class_code": active_class, "survey_round": ocr_round, "이름": d.get("이름", "미기재"),
+                                        "마음날씨": d.get("마음날씨", "구름 조금"), "현재기분": d.get("현재기분", "그냥 보통이에요"),
+                                        "깊이있는마음": d.get("깊이있는마음", ""),
+                                        "주요고민": ", ".join(d.get("주요고민", [])), "짜증순간": ", ".join(d.get("짜증순간", [])),
+                                        "필요한것": ", ".join(d.get("필요한것", [])), "친한친구": d.get("친한친구", ""),
+                                        "자주노는친구": d.get("자주노는친구", ""), "친해지고싶은친구": d.get("친해지고싶은친구", ""),
+                                        "멀리있는친구": d.get("멀리있는친구", ""), "관계어려움": ", ".join(d.get("관계어려움", [])),
+                                        "점수_즐거움": d.get("점수_즐거움", 4), "점수_힘든친구": d.get("점수_힘든친구", 1),
+                                        "점수_상담대상": d.get("점수_상담대상", 4), "비밀편지여부": d.get("비밀편지여부", "괜찮아요"),
+                                        "하고싶은말": d.get("하고싶은말", ""), "제출방식": "AI 묶음스캔", "제출일시": datetime.now(KST).isoformat()
+                                    })
+                                success_batch = True
+                                break
+                            except Exception as e:
+                                err_str = str(e)
+                                if "503" in err_str and attempt < 2:
+                                    time.sleep(5)
+                                    continue
+                                else:
+                                    st.warning(f"⚠️ {start_p}~{end_p}페이지 묶음 처리 중 오류: {e}")
+                                    break
+
+                        prog.progress((b_idx + 1) / total_batches)
+                        if b_idx < total_batches - 1:
+                            time.sleep(3)  # 분당 요청 제한(RPM) 방지용 짧은 대기
+
+                    if rows:
+                        st.session_state["ocr_df"] = pd.DataFrame(rows)
+                        status_box.success(f"✅ 총 {len(rows)}건의 설문 판독이 완료되었습니다! 아래 표에서 검수 후 저장하세요.")
 
         if "ocr_df" in st.session_state and not st.session_state["ocr_df"].empty:
-            st.subheader("📝 판독 결과 검수 (수정 가능)")
-            edited_df = st.data_editor(st.session_state["ocr_df"], use_container_width=True)
-            if st.button("💾 검수 완료 데이터 DB 저장", type="primary"):
-                insert_responses(edited_df.to_dict(orient="records"))
-                st.success("저장 완료!")
+            st.subheader("📝 판독 결과 검수 (더블클릭하여 수정 가능)")
+            edited_df = st.data_editor(st.session_state["ocr_df"], num_rows="dynamic", use_container_width=True)
+            col_b1, col_b2 = st.columns(2)
+            with col_b1:
+                if st.button("💾 검수 완료 데이터 DB 저장", type="primary", use_container_width=True):
+                    insert_responses(edited_df.to_dict(orient="records"))
+                    st.success("저장 완료!")
+            with col_b2:
+                st.download_button(
+                    "📥 엑셀(.xlsx)로 다운로드",
+                    data=to_excel_bytes(edited_df),
+                    file_name=f"AI스캔결과_{ocr_round}.xlsx",
+                    use_container_width=True
+                )
 
 # =========================================================
 # [모드 3] 통합 분석 대시보드

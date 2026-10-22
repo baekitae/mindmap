@@ -9,7 +9,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 import networkx as nx
 from PIL import Image
-import fitz  # PyMuPDF (시스템 poppler 없이도 PDF를 이미지로 완벽 변환)
+import fitz  # PyMuPDF
 from pydantic import BaseModel, Field
 from google import genai
 from google.genai import types
@@ -359,7 +359,6 @@ elif app_mode == "📸 2. 종이 설문지 AI 스캔 (교사용)":
                     file_bytes = f.getvalue()
                     if f.name.lower().endswith(".pdf"):
                         try:
-                            # PyMuPDF(fitz)로 시스템 poppler 의존성 없이 PDF 페이지 변환
                             doc = fitz.open(stream=file_bytes, filetype="pdf")
                             for page in doc:
                                 pix = page.get_pixmap(dpi=150)
@@ -378,7 +377,7 @@ elif app_mode == "📸 2. 종이 설문지 AI 스캔 (교사용)":
                         try:
                             prompt = f"초등학생 설문지입니다. 우리 반 명단[{', '.join(student_list)}]을 참고하여 오타 없이 학생 이름을 매칭하고 JSON으로 추출하세요."
                             res = client.models.generate_content(
-                                model="gemini-2.5-flash",
+                                model="gemini-3.8-flash",  # 최신 권장 모델로 업데이트
                                 contents=[types.Part.from_bytes(data=img_bytes, mime_type="image/jpeg"), prompt],
                                 config=types.GenerateContentConfig(response_mime_type="application/json", response_schema=SurveyExtraction, temperature=0.1)
                             )
@@ -490,7 +489,7 @@ elif app_mode == "📋 4. 엑셀로 명렬표 일괄 등록 & 회차 설정 (교
             st.success("회차가 변경되었습니다.")
 
         st.divider()
-        st.subheader("2️⃣ 엑셀로 학생 명렬표 일괄 업로드")
+        st.subheader("2️⃣ 엑셀로 학생 명렬표 일괄 등록")
         st.markdown("엑셀 파일에 **`student_no`**(출석번호)와 **`name`**(이름) 두 개의 열(Column)만 포함하여 업로드해 주세요.")
 
         sample_r = pd.DataFrame({"student_no": [1, 2, 3], "name": ["김철수", "이영희", "박민수"]})

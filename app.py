@@ -33,7 +33,11 @@ GEMINI_API_KEY = get_secret("GEMINI_API_KEY")
 @st.cache_resource
 def init_supabase() -> Client | None:
     if SUPABASE_URL and SUPABASE_KEY:
-        return create_client(SUPABASE_URL, SUPABASE_KEY)
+        try:
+            return create_client(SUPABASE_URL, SUPABASE_KEY)
+        except Exception as e:
+            st.error(f"Supabase 연결 초기화 실패: {e}")
+            return None
     return None
 
 supabase = init_supabase()
@@ -61,7 +65,7 @@ class SurveyExtraction(BaseModel):
     하고싶은말: str = Field(description="서술형 텍스트 전체")
 
 # ---------------------------------------------------------
-# 2. DB 연동 함수 (다중 교사 및 학급별 분리)
+# 2. DB 연동 함수 (에러 상세 포착 기능 추가)
 # ---------------------------------------------------------
 def get_all_teachers() -> list[dict]:
     if supabase:
@@ -69,17 +73,24 @@ def get_all_teachers() -> list[dict]:
             res = supabase.table("teacher_classes").select("*").execute()
             if res.data:
                 return res.data
-        except:
+        except Exception as e:
+            # 테이블이 없거나 연결 에러 시 조용히 넘김
             pass
     return []
 
 def register_teacher(class_code, teacher_name, pin_code):
     if supabase:
-        supabase.table("teacher_classes").upsert({
-            "class_code": class_code,
-            "teacher_name": teacher_name,
-            "pin_code": pin_code
-        }).execute()
+        try:
+            res = supabase.table("teacher_classes").upsert({
+                "class_code": class_code,
+                "teacher_name": teacher_name,
+                "pin_code": pin_code
+            }).execute()
+            return True, None
+        except Exception as e:
+            return False, str(e)
+    else:
+        return False, "Supabase 클라이언트가 연결되지 않았습니다. Secrets 설정을 확인해주세요."
 
 def load_roster(class_code: str) -> pd.DataFrame:
     if supabase:
@@ -204,7 +215,6 @@ if selected_class != "-- 학급을 선택하세요 --":
     st.session_state["current_class_code"] = selected_class
     t_info = next((t for t in teachers if t["class_code"] == selected_class), None)
     
-    # 교사 PIN 인증 UI
     st.sidebar.markdown(f"**담당 선생님:** {t_info['teacher_name']} 님")
     pin_try = st.sidebar.text_input("교사용 비밀번호(PIN)", type="password", key="sidebar_pin")
     if st.sidebar.button("교사 모드 로그인"):
@@ -221,19 +231,21 @@ else:
 st.sidebar.divider()
 st.sidebar.markdown("➕ **새로운 학급/선생님 등록**")
 with st.sidebar.form("new_teacher_form"):
-    new_code = st.text_input("학급 코드 (예: 3학년7반_배기태)")
+    new_code = st.text_input("학급 코드 (예: 3학년7반)")
     new_tname = st.text_input("선생님 성함")
     new_pin = st.text_input("4자리 비밀번호 설정", type="password")
     reg_btn = st.form_submit_button("학급 등록하기")
     if reg_btn:
         if new_code and new_tname and new_pin:
-            register_teacher(new_code.strip(), new_tname.strip(), new_pin.strip())
-            st.success("등록 완료! 위 메뉴에서 선택해주세요.")
-            st.rerun()
+            success, err_msg = register_teacher(new_code.strip(), new_tname.strip(), new_pin.strip())
+            if success:
+                st.success("등록 완료! 위 메뉴에서 선택해주세요.")
+                st.rerun()
+            else:
+                st.error(f"❌ 등록 실패 에러 내용: {err_msg}")
         else:
             st.warning("모든 항목을 입력해주세요.")
 
-# 현재 선택된 학급 정보
 active_class = st.session_state["current_class_code"]
 roster_df = load_roster(active_class) if active_class else pd.DataFrame(columns=["student_no", "name"])
 student_list = roster_df["name"].tolist() if not roster_df.empty else []
@@ -260,7 +272,6 @@ app_mode = st.sidebar.radio(
     ]
 )
 
-# 교사 권한 체크 함수
 def require_teacher_auth() -> bool:
     if st.session_state["is_teacher_auth"]:
         return True
@@ -483,7 +494,6 @@ elif app_mode == "📋 4. 엑셀로 명렬표 일괄 등록 & 회차 설정 (교
         st.subheader("2️⃣ 엑셀로 학생 명렬표 일괄 업로드")
         st.markdown("엑셀 파일에 **`student_no`**(출석번호)와 **`name`**(이름) 두 개의 열(Column)만 포함하여 업로드해 주세요.")
 
-        # 엑셀 양식 다운로드
         sample_r = pd.DataFrame({"student_no": [1, 2, 3], "name": ["김철수", "이영희", "박민수"]})
         st.download_button("📥 명렬표 업로드용 엑셀 양식 다운로드", data=to_excel_bytes(sample_r), file_name="명렬표_업로드양식.xlsx")
 

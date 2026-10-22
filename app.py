@@ -8,6 +8,8 @@ import numpy as np
 import plotly.express as px
 import plotly.graph_objects as go
 import networkx as nx
+from PIL import Image
+from pdf2image import convert_from_bytes
 from pydantic import BaseModel, Field
 from google import genai
 from google.genai import types
@@ -36,7 +38,6 @@ def init_supabase() -> Client | None:
         try:
             return create_client(SUPABASE_URL, SUPABASE_KEY)
         except Exception as e:
-            st.error(f"Supabase 연결 초기화 실패: {e}")
             return None
     return None
 
@@ -65,41 +66,32 @@ class SurveyExtraction(BaseModel):
     하고싶은말: str = Field(description="서술형 텍스트 전체")
 
 # ---------------------------------------------------------
-# 2. DB 연동 함수 (에러 상세 포착 기능 추가)
+# 2. DB 연동 함수
 # ---------------------------------------------------------
 def get_all_teachers() -> list[dict]:
     if supabase:
         try:
             res = supabase.table("teacher_classes").select("*").execute()
-            if res.data:
-                return res.data
-        except Exception as e:
-            # 테이블이 없거나 연결 에러 시 조용히 넘김
-            pass
+            if res.data: return res.data
+        except: pass
     return []
 
 def register_teacher(class_code, teacher_name, pin_code):
     if supabase:
         try:
-            res = supabase.table("teacher_classes").upsert({
-                "class_code": class_code,
-                "teacher_name": teacher_name,
-                "pin_code": pin_code
+            supabase.table("teacher_classes").upsert({
+                "class_code": class_code, "teacher_name": teacher_name, "pin_code": pin_code
             }).execute()
             return True, None
-        except Exception as e:
-            return False, str(e)
-    else:
-        return False, "Supabase 클라이언트가 연결되지 않았습니다. Secrets 설정을 확인해주세요."
+        except Exception as e: return False, str(e)
+    return False, "Supabase 미연결"
 
 def load_roster(class_code: str) -> pd.DataFrame:
     if supabase:
         try:
             res = supabase.table("student_roster").select("student_no, name").eq("class_code", class_code).order("student_no").execute()
-            if res.data:
-                return pd.DataFrame(res.data)
-        except:
-            pass
+            if res.data: return pd.DataFrame(res.data)
+        except: pass
     return pd.DataFrame(columns=["student_no", "name"])
 
 def save_roster(class_code: str, roster_df: pd.DataFrame):
@@ -112,24 +104,19 @@ def save_roster(class_code: str, roster_df: pd.DataFrame):
                 s_name = str(row["name"]).strip()
                 if s_name and s_name != "nan":
                     records.append({"class_code": class_code, "student_no": s_no, "name": s_name})
-            except:
-                continue
-        if records:
-            supabase.table("student_roster").insert(records).execute()
+            except: continue
+        if records: supabase.table("student_roster").insert(records).execute()
 
 def load_responses(class_code: str) -> pd.DataFrame:
     if supabase:
         try:
             res = supabase.table("survey_responses").select("*").eq("class_code", class_code).order("제출일시", desc=False).execute()
-            if res.data:
-                return pd.DataFrame(res.data).fillna("")
-        except:
-            pass
+            if res.data: return pd.DataFrame(res.data).fillna("")
+        except: pass
     return pd.DataFrame()
 
 def insert_responses(records: list[dict]):
-    if supabase:
-        supabase.table("survey_responses").insert(records).execute()
+    if supabase: supabase.table("survey_responses").insert(records).execute()
 
 def to_excel_bytes(df: pd.DataFrame):
     output = BytesIO()
@@ -141,8 +128,7 @@ def to_excel_bytes(df: pd.DataFrame):
 # 3. 분석 함수
 # ---------------------------------------------------------
 def analyze_student_metrics(df: pd.DataFrame) -> pd.DataFrame:
-    if df.empty:
-        return df
+    if df.empty: return df
     df = df.copy()
     weather_score = {"아주 맑음": 0, "구름 조금": 1, "비 옴": 3, "천둥 번개": 4}
     mood_score = {"기분이 좋아요": 0, "그냥 보통이에요": 1, "조금 지쳐요": 2, "속상해요": 3, "화가 나요": 4}
@@ -162,8 +148,7 @@ def analyze_student_metrics(df: pd.DataFrame) -> pd.DataFrame:
         for col, target_dict in [("친한친구", in_degree_close), ("친해지고싶은친구", in_degree_want), ("멀리있는친구", in_degree_distant)]:
             if pd.notna(row[col]) and str(row[col]).strip() != "":
                 targets = [t.strip() for t in str(row[col]).split(",") if t.strip() in in_degree_close]
-                for t in targets:
-                    target_dict[t] += 1
+                for t in targets: target_dict[t] += 1
 
     df["친한친구_피지목수"] = df["이름"].map(in_degree_close)
     df["희망친구_피지목수"] = df["이름"].map(in_degree_want)
@@ -178,18 +163,13 @@ def analyze_student_metrics(df: pd.DataFrame) -> pd.DataFrame:
         score += (5 - int(row["점수_즐거움"]))
         score += (int(row["점수_힘든친구"]) - 1)
         score += (5 - int(row["점수_상담대상"]))
-        if row["비밀편지여부"] == "비밀이에요!":
-            score += 3
-        if row["친한친구_피지목수"] == 0:
-            score += 2
+        if row["비밀편지여부"] == "비밀이에요!": score += 3
+        if row["친한친구_피지목수"] == 0: score += 2
 
         risk_scores.append(score)
-        if score >= 14 or row["비밀편지여부"] == "비밀이에요!":
-            status_labels.append("🚨 집중 관심 (상담 권고)")
-        elif score >= 7 or row["친한친구_피지목수"] == 0:
-            status_labels.append("⚠️ 세심한 관찰")
-        else:
-            status_labels.append("🟢 안정 및 양호")
+        if score >= 14 or row["비밀편지여부"] == "비밀이에요!": status_labels.append("🚨 집중 관심 (상담 권고)")
+        elif score >= 7 or row["친한친구_피지목수"] == 0: status_labels.append("⚠️ 세심한 관찰")
+        else: status_labels.append("🟢 안정 및 양호")
 
     df["위기점수"] = risk_scores
     df["관심단계"] = status_labels
@@ -198,13 +178,10 @@ def analyze_student_metrics(df: pd.DataFrame) -> pd.DataFrame:
 # ---------------------------------------------------------
 # 4. 앱 세션 및 로그인 세팅
 # ---------------------------------------------------------
-if "current_class_code" not in st.session_state:
-    st.session_state["current_class_code"] = ""
-if "is_teacher_auth" not in st.session_state:
-    st.session_state["is_teacher_auth"] = False
+if "current_class_code" not in st.session_state: st.session_state["current_class_code"] = ""
+if "is_teacher_auth" not in st.session_state: st.session_state["is_teacher_auth"] = False
 
 st.sidebar.title("🏫 우리 반 마음 시스템")
-
 teachers = get_all_teachers()
 class_options = [t["class_code"] for t in teachers]
 
@@ -214,7 +191,6 @@ selected_class = st.sidebar.selectbox("등록된 학급 선택", options=["-- �
 if selected_class != "-- 학급을 선택하세요 --":
     st.session_state["current_class_code"] = selected_class
     t_info = next((t for t in teachers if t["class_code"] == selected_class), None)
-    
     st.sidebar.markdown(f"**담당 선생님:** {t_info['teacher_name']} 님")
     pin_try = st.sidebar.text_input("교사용 비밀번호(PIN)", type="password", key="sidebar_pin")
     if st.sidebar.button("교사 모드 로그인"):
@@ -222,8 +198,7 @@ if selected_class != "-- 학급을 선택하세요 --":
             st.session_state["is_teacher_auth"] = True
             st.sidebar.success("로그인 성공!")
             st.rerun()
-        else:
-            st.sidebar.error("비밀번호가 틀렸습니다.")
+        else: st.sidebar.error("비밀번호가 틀렸습니다.")
 else:
     st.session_state["current_class_code"] = ""
     st.session_state["is_teacher_auth"] = False
@@ -234,17 +209,21 @@ with st.sidebar.form("new_teacher_form"):
     new_code = st.text_input("학급 코드 (예: 3학년7반)")
     new_tname = st.text_input("선생님 성함")
     new_pin = st.text_input("4자리 비밀번호 설정", type="password")
-    reg_btn = st.form_submit_button("학급 등록하기")
-    if reg_btn:
-        if new_code and new_tname and new_pin:
-            success, err_msg = register_teacher(new_code.strip(), new_tname.strip(), new_pin.strip())
-            if success:
-                st.success("등록 완료! 위 메뉴에서 선택해주세요.")
+    if st.sidebar.form_submit_button("학급 등록하기") or st.form_submit_button("학급 등록하기버튼"): # 폼 제출 핸들러
+        pass
+# 간소화된 폼 처리
+with st.sidebar.form("new_t_form"):
+    n_code = st.text_input("학급 코드 (예: 3-7반)")
+    n_name = st.text_input("선생님 이름")
+    n_pin = st.text_input("4자리 PIN", type="password")
+    if st.form_submit_button("새 학급 등록"):
+        if n_code and n_name and n_pin:
+            ok, err = register_teacher(n_code.strip(), n_name.strip(), n_pin.strip())
+            if ok:
+                st.success("등록 완료! 위에서 선택하세요.")
                 st.rerun()
-            else:
-                st.error(f"❌ 등록 실패 에러 내용: {err_msg}")
-        else:
-            st.warning("모든 항목을 입력해주세요.")
+            else: st.error(f"등록 실패: {err}")
+        else: st.warning("모든 항목을 입력하세요.")
 
 active_class = st.session_state["current_class_code"]
 roster_df = load_roster(active_class) if active_class else pd.DataFrame(columns=["student_no", "name"])
@@ -254,9 +233,6 @@ student_display_list = [f"{row['student_no']}번 {row['name']}" for _, row in ro
 if "active_round" not in st.session_state:
     st.session_state["active_round"] = f"{datetime.now(KST).strftime('%Y-%m')}차 설문"
 
-# ---------------------------------------------------------
-# 5. 메인 화면 네비게이션
-# ---------------------------------------------------------
 if not active_class:
     st.title("🌱 우리들의 마음 이야기 & 교우관계 통합 시스템")
     st.info("👈 좌측 사이드바에서 **[등록된 학급을 선택]**하거나 **[새로운 학급을 등록]**해주세요.")
@@ -273,8 +249,7 @@ app_mode = st.sidebar.radio(
 )
 
 def require_teacher_auth() -> bool:
-    if st.session_state["is_teacher_auth"]:
-        return True
+    if st.session_state["is_teacher_auth"]: return True
     st.warning("🔒 **교사 전용 메뉴입니다.** 좌측 사이드바에서 비밀번호(PIN)를 입력하고 로그인해 주세요.")
     return False
 
@@ -366,46 +341,78 @@ if app_mode == "👦 1. 학생용 설문 참여":
         st.warning("⚠️ 등록된 학생 명렬표가 없습니다. [📋 4. 엑셀로 명렬표 일괄 등록] 메뉴에서 먼저 명렬표를 등록해주세요.")
 
 # =========================================================
-# [모드 2] 종이 설문지 AI 스캔
+# [모드 2] 종이 설문지 AI 스캔 (PDF 및 이미지 지원)
 # =========================================================
 elif app_mode == "📸 2. 종이 설문지 AI 스캔 (교사용)":
     if require_teacher_auth():
-        st.title("📸 종이 설문지 AI 자동 인식 (OCR)")
+        st.title("📸 종이 설문지 AI 자동 인식 (PDF & 이미지 OCR)")
+        st.markdown("복합기로 스캔한 **PDF 파일** 또는 **이미지 파일(png, jpg)**을 업로드하면, 페이지별로 자동 분해하여 AI가 일괄 판독합니다.")
+        
         ocr_round = st.text_input("설문 회차", value=st.session_state["active_round"])
         api_k = st.text_input("Gemini API Key", value=GEMINI_API_KEY, type="password")
         
-        uploaded_images = st.file_uploader("스캔 이미지 다중 업로드", type=["png", "jpg", "jpeg"], accept_multiple_files=True)
-        if uploaded_images and st.button("AI 판독 시작", type="primary"):
-            if not api_k: st.error("API 키를 입력해주세요.")
+        uploaded_files = st.file_uploader(
+            "설문지 파일 업로드 (PDF 또는 이미지 다중 선택 가능)",
+            type=["pdf", "png", "jpg", "jpeg"],
+            accept_multiple_files=True
+        )
+
+        if uploaded_files and st.button("🤖 AI 판독 시작", type="primary"):
+            if not api_k:
+                st.error("API 키를 입력해주세요.")
             else:
-                rows = []
-                prog = st.progress(0)
-                for i, img in enumerate(uploaded_images):
+                all_images_to_process = []
+                for f in uploaded_files:
+                    file_bytes = f.getvalue()
+                    if f.name.lower().endswith(".pdf"):
+                        # PDF인 경우 페이지별 이미지로 변환
+                        try:
+                            pdf_images = convert_from_bytes(file_bytes)
+                            for p_img in pdf_images:
+                                img_io = BytesIO()
+                                p_img.save(img_io, format='JPEG')
+                                all_images_to_process.append(img_io.getvalue())
+                        except Exception as e:
+                            st.error(f"PDF 변환 오류 ({f.name}): {e}")
+                    else:
+                        all_images_to_process.append(file_bytes)
+
+                if all_images_to_process:
+                    rows = []
+                    prog = st.progress(0)
                     client = genai.Client(api_key=api_k)
-                    prompt = f"초등학생 설문지입니다. 우리 반 명단[{', '.join(student_list)}]을 참고하여 오타 없이 학생 이름을 매칭하고 JSON으로 추출하세요."
-                    res = client.models.generate_content(
-                        model="gemini-2.5-flash",
-                        contents=[types.Part.from_bytes(data=img.getvalue(), mime_type="image/jpeg"), prompt],
-                        config=types.GenerateContentConfig(response_mime_type="application/json", response_schema=SurveyExtraction, temperature=0.1)
-                    )
-                    d = json.loads(res.text)
-                    rows.append({
-                        "class_code": active_class, "survey_round": ocr_round, "이름": d.get("이름"),
-                        "마음날씨": d.get("마음날씨"), "현재기분": d.get("현재기분"), "깊이있는마음": d.get("깊이있는마음"),
-                        "주요고민": ", ".join(d.get("주요고민", [])), "짜증순간": ", ".join(d.get("짜증순간", [])),
-                        "필요한것": ", ".join(d.get("필요한것", [])), "친한친구": d.get("친한친구"),
-                        "자주노는친구": d.get("자주노는친구"), "친해지고싶은친구": d.get("친해지고싶은친구"),
-                        "멀리있는친구": d.get("멀리있는친구"), "관계어려움": ", ".join(d.get("관계어려움", [])),
-                        "점수_즐거움": d.get("점수_즐거움", 4), "점수_힘든친구": d.get("점수_힘든친구", 1),
-                        "점수_상담대상": d.get("점수_상담대상", 4), "비밀편지여부": d.get("비밀편지여부", "괜찮아요"),
-                        "하고싶은말": d.get("하고싶은말"), "제출방식": "AI 스캔", "제출일시": datetime.now(KST).isoformat()
-                    })
-                    prog.progress((i+1)/len(uploaded_images))
-                st.session_state["ocr_df"] = pd.DataFrame(rows)
+                    
+                    for i, img_bytes in enumerate(all_images_to_process):
+                        try:
+                            prompt = f"초등학생 설문지입니다. 우리 반 명단[{', '.join(student_list)}]을 참고하여 오타 없이 학생 이름을 매칭하고 JSON으로 추출하세요."
+                            res = client.models.generate_content(
+                                model="gemini-2.5-flash",
+                                contents=[types.Part.from_bytes(data=img_bytes, mime_type="image/jpeg"), prompt],
+                                config=types.GenerateContentConfig(response_mime_type="application/json", response_schema=SurveyExtraction, temperature=0.1)
+                            )
+                            d = json.loads(res.text)
+                            rows.append({
+                                "class_code": active_class, "survey_round": ocr_round, "이름": d.get("이름"),
+                                "마음날씨": d.get("마음날씨"), "현재기분": d.get("현재기분"), "깊이있는마음": d.get("깊이있는마음"),
+                                "주요고민": ", ".join(d.get("주요고민", [])), "짜증순간": ", ".join(d.get("짜증순간", [])),
+                                "필요한것": ", ".join(d.get("필요한것", [])), "친한친구": d.get("친한친구"),
+                                "자주노는친구": d.get("자주노는친구"), "친해지고싶은친구": d.get("친해지고싶은친구"),
+                                "멀리있는친구": d.get("멀리있는친구"), "관계어려움": ", ".join(d.get("관계어려움", [])),
+                                "점수_즐거움": d.get("점수_즐거움", 4), "점수_힘든친구": d.get("점수_힘든친구", 1),
+                                "점수_상담대상": d.get("점수_상담대상", 4), "비밀편지여부": d.get("비밀편지여부", "괜찮아요"),
+                                "하고싶은말": d.get("하고싶은말"), "제출방식": "AI 스캔(PDF/이미지)", "제출일시": datetime.now(KST).isoformat()
+                            })
+                        except Exception as e:
+                            st.warning(f"{i+1}번째 페이지 판독 중 오류 발생: {e}")
+                        prog.progress((i + 1) / len(all_images_to_process))
+
+                    st.session_state["ocr_df"] = pd.DataFrame(rows)
+                    st.success("✅ 모든 페이지 판독이 완료되었습니다! 아래 표에서 검수 후 저장하세요.")
 
         if "ocr_df" in st.session_state and not st.session_state["ocr_df"].empty:
+            st.subheader("📝 판독 결과 검수 (수정 가능)")
             edited_df = st.data_editor(st.session_state["ocr_df"], use_container_width=True)
-            if st.button("DB 저장", type="primary"):
+            if st.button("💾 검수 완료 데이터 DB 저장", type="primary"):
                 insert_responses(edited_df.to_dict(orient="records"))
                 st.success("저장 완료!")
 

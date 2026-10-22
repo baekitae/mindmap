@@ -9,3 +9,4 @@ pillow
 pydantic
 supabase
 pdf2image
+poppler-utils

@@ -9,7 +9,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 import networkx as nx
 from PIL import Image
-from pdf2image import convert_from_bytes
+import fitz  # PyMuPDF (시스템 poppler 없이도 PDF를 이미지로 완벽 변환)
 from pydantic import BaseModel, Field
 from google import genai
 from google.genai import types
@@ -339,7 +339,7 @@ if app_mode == "👦 1. 학생용 설문 참여":
 elif app_mode == "📸 2. 종이 설문지 AI 스캔 (교사용)":
     if require_teacher_auth():
         st.title("📸 종이 설문지 AI 자동 인식 (PDF & 이미지 OCR)")
-        st.markdown("복합기로 스캔한 **PDF 파일** 또는 **이미지 파일(png, jpg)**을 업로드하면, 페이지별로 자동 분해하여 AI가 일괄 판독합니다.")
+        st.markdown("복합기로 스캔한 **PDF 파일** 또는 **이미지 파일(png, jpg)**을 업로드하면, PyMuPDF를 통해 페이지별 이미지로 자동 변환되어 AI가 일괄 판독합니다.")
         
         ocr_round = st.text_input("설문 회차", value=st.session_state["active_round"])
         api_k = st.text_input("Gemini API Key", value=GEMINI_API_KEY, type="password")
@@ -359,11 +359,11 @@ elif app_mode == "📸 2. 종이 설문지 AI 스캔 (교사용)":
                     file_bytes = f.getvalue()
                     if f.name.lower().endswith(".pdf"):
                         try:
-                            pdf_images = convert_from_bytes(file_bytes)
-                            for p_img in pdf_images:
-                                img_io = BytesIO()
-                                p_img.save(img_io, format='JPEG')
-                                all_images_to_process.append(img_io.getvalue())
+                            # PyMuPDF(fitz)로 시스템 poppler 의존성 없이 PDF 페이지 변환
+                            doc = fitz.open(stream=file_bytes, filetype="pdf")
+                            for page in doc:
+                                pix = page.get_pixmap(dpi=150)
+                                all_images_to_process.append(pix.tobytes("jpeg"))
                         except Exception as e:
                             st.error(f"PDF 변환 오류 ({f.name}): {e}")
                     else:

@@ -31,7 +31,7 @@ def get_secret(key, default=""):
 
 SUPABASE_URL = get_secret("SUPABASE_URL")
 SUPABASE_KEY = get_secret("SUPABASE_KEY")
-GEMINI_API_KEY = get_secret("GEMINI_API_KEY")
+DEFAULT_GEMINI_API_KEY = get_secret("GEMINI_API_KEY")
 
 @st.cache_resource
 def init_supabase() -> Client | None:
@@ -70,7 +70,7 @@ class BatchSurveyExtraction(BaseModel):
     results: list[SurveyExtraction] = Field(description="업로드된 각 설문지 이미지 순서대로 추출된 결과 리스트")
 
 # ---------------------------------------------------------
-# 2. DB 연동 함수
+# 2. DB 연동 함수 (교사별 개별 API Key 저장 및 로드 포함)
 # ---------------------------------------------------------
 def get_all_teachers() -> list[dict]:
     if supabase:
@@ -80,15 +80,22 @@ def get_all_teachers() -> list[dict]:
         except: pass
     return []
 
-def register_teacher(class_code, teacher_name, pin_code):
+def register_teacher(class_code, teacher_name, pin_code, gemini_api_key=""):
     if supabase:
         try:
             supabase.table("teacher_classes").upsert({
-                "class_code": class_code, "teacher_name": teacher_name, "pin_code": pin_code
-            }).execute()
+                "class_code": class_code,
+                "teacher_name": teacher_name,
+                "pin_code": pin_code,
+                "gemini_api_key": gemini_api_key
+            }, on_conflict="class_code").execute()
             return True, None
         except Exception as e: return False, str(e)
     return False, "Supabase 미연결"
+
+def update_teacher_api_key(class_code: str, new_api_key: str):
+    if supabase:
+        supabase.table("teacher_classes").update({"gemini_api_key": new_api_key}).eq("class_code", class_code).execute()
 
 def load_roster(class_code: str) -> pd.DataFrame:
     if supabase:
@@ -192,7 +199,10 @@ class_options = [t["class_code"] for t in teachers]
 st.sidebar.markdown("### 🎓 학급 선택 / 로그인")
 selected_class = st.sidebar.selectbox("등록된 학급 선택", options=["-- 학급을 선택하세요 --"] + class_options)
 
+t_info = None
 if selected_class != "-- 학급을 선택하세요 --":
+    if st.session_state["current_class_code"] != selected_class:
+        st.session_state["is_teacher_auth"] = False  # 다른 학급 선택 시 재로그인 요구
     st.session_state["current_class_code"] = selected_class
     t_info = next((t for t in teachers if t["class_code"] == selected_class), None)
     st.sidebar.markdown(f"**담당 선생님:** {t_info['teacher_name']} 님")
@@ -213,16 +223,24 @@ with st.sidebar.form("new_teacher_form"):
     new_code = st.text_input("학급 코드 (예: 3-7반)")
     new_tname = st.text_input("선생님 성함")
     new_pin = st.text_input("4자리 비밀번호 설정", type="password")
+    new_api_key = st.text_input(
+        "개인 Gemini API Key (선택)",
+        type="password",
+        help="종이 설문지 AI 스캔을 사용하실 선생님은 Google AI Studio에서 발급받은 본인의 API 키를 입력해 주세요."
+    )
     if st.form_submit_button("학급 등록하기"):
         if new_code and new_tname and new_pin:
-            ok, err = register_teacher(new_code.strip(), new_tname.strip(), new_pin.strip())
+            ok, err = register_teacher(new_code.strip(), new_tname.strip(), new_pin.strip(), new_api_key.strip())
             if ok:
-                st.success("등록 완료! 위에서 선택하세요.")
+                st.success("등록 완료! 위에서 학급을 선택하세요.")
                 st.rerun()
             else: st.error(f"등록 실패: {err}")
-        else: st.warning("모든 항목을 입력하세요.")
+        else: st.warning("학급 코드, 성함, 비밀번호는 필수입니다.")
 
 active_class = st.session_state["current_class_code"]
+teacher_saved_api_key = (t_info.get("gemini_api_key") or "") if t_info else ""
+effective_api_key = teacher_saved_api_key if teacher_saved_api_key else DEFAULT_GEMINI_API_KEY
+
 roster_df = load_roster(active_class) if active_class else pd.DataFrame(columns=["student_no", "name"])
 student_list = roster_df["name"].tolist() if not roster_df.empty else []
 student_display_list = [f"{row['student_no']}번 {row['name']}" for _, row in roster_df.iterrows()] if not roster_df.empty else []
@@ -241,7 +259,7 @@ app_mode = st.sidebar.radio(
         "👦 1. 학생용 설문 참여",
         "📸 2. 종이 설문지 AI 스캔 (교사용)",
         "📊 3. 통합 분석 & 변화 추적 (교사용)",
-        "📋 4. 엑셀로 명렬표 일괄 등록 & 회차 설정 (교사용)"
+        "📋 4. 명렬표·회차·API 키 설정 (교사용)"
     ]
 )
 
@@ -335,28 +353,31 @@ if app_mode == "👦 1. 학생용 설문 참여":
                     st.balloons()
                     st.success("제출이 완료되었습니다!")
     else:
-        st.warning("⚠️ 등록된 학생 명렬표가 없습니다. [📋 4. 엑셀로 명렬표 일괄 등록] 메뉴에서 먼저 명렬표를 등록해주세요.")
+        st.warning("⚠️ 등록된 학생 명렬표가 없습니다. [📋 4. 명렬표·회차·API 키 설정] 메뉴에서 먼저 명렬표를 등록해주세요.")
 
 # =========================================================
-# [모드 2] 종이 설문지 AI 스캔 (배치 처리 & 쿼터 절약형)
+# [모드 2] 종이 설문지 AI 스캔 (배치 처리 & 교사별 API 키 자동 연동)
 # =========================================================
 elif app_mode == "📸 2. 종이 설문지 AI 스캔 (교사용)":
     if require_teacher_auth():
         st.title("📸 종이 설문지 AI 자동 인식 (묶음 배치 OCR)")
-        st.info("💡 **무료 API 한도(일 20회 제한) 해결 완료!** 이제 한 장씩 보내지 않고 **10장씩 묶어서 단 1번의 API 호출**로 처리하므로, 60장짜리 PDF도 단 6번의 요청만으로 한도 초과 없이 빠르게 판독합니다.")
+        if teacher_saved_api_key:
+            st.success(f"🔑 현재 **{t_info['teacher_name']}** 선생님의 전용 Gemini API 키가 자동으로 연결되어 있습니다.")
+        else:
+            st.info("💡 전용 API 키가 아직 등록되지 않았습니다. 아래에 직접 입력하거나 [📋 4. 설정] 메뉴에서 본인의 API 키를 저장해 두시면 매번 입력할 필요가 없습니다.")
         
         c_opt1, c_opt2, c_opt3 = st.columns(3)
         with c_opt1:
             ocr_round = st.text_input("설문 회차", value=st.session_state["active_round"])
         with c_opt2:
             model_name = st.selectbox(
-                "사용할 AI 모델 (한도 초과 시 다른 모델 선택)",
-                ["gemini-3.8-flash", "gemini-2.0-flash", "gemini-1.5-flash"]
+                "사용할 AI 모델 (한도 초과 시 변경)",
+                ["gemini-2.0-flash", "gemini-1.5-flash", "gemini-3.8-flash"]
             )
         with c_opt3:
-            batch_size = st.slider("1회 호출당 묶음 페이지 수 (Batch Size)", min_value=5, max_value=15, value=10)
+            batch_size = st.slider("1회 호출당 묶음 페이지 수", min_value=5, max_value=15, value=10)
 
-        api_k = st.text_input("Gemini API Key (기존 키가 20회 다 찼다면 새 키 입력 가능)", value=GEMINI_API_KEY, type="password")
+        api_k = st.text_input("적용될 Gemini API Key", value=effective_api_key, type="password")
         
         uploaded_files = st.file_uploader(
             "설문지 파일 업로드 (PDF 또는 이미지 다중 선택 가능)",
@@ -365,7 +386,6 @@ elif app_mode == "📸 2. 종이 설문지 AI 스캔 (교사용)":
         )
 
         if uploaded_files:
-            # 전체 페이지 수 미리 확인 및 구간 지정 기능
             all_images_to_process = []
             for f in uploaded_files:
                 file_bytes = f.getvalue()
@@ -384,7 +404,7 @@ elif app_mode == "📸 2. 종이 설문지 AI 스캔 (교사용)":
             st.write(f"📄 **총 감지된 페이지 수:** {total_pages}페이지 (예상 API 호출 횟수: **{(total_pages - 1) // batch_size + 1}회**)")
 
             page_range = st.slider(
-                "판독할 페이지 범위 선택 (특정 구간만 이어서 판독할 때 조절하세요)",
+                "판독할 페이지 범위 선택",
                 min_value=1, max_value=max(1, total_pages), value=(1, max(1, total_pages))
             )
 
@@ -417,8 +437,6 @@ elif app_mode == "📸 2. 종이 설문지 AI 스캔 (교사용)":
                         )
                         contents_payload.append(prompt)
 
-                        # 503 또는 일시적 오류 발생 시 최대 3회 자동 재시도
-                        success_batch = False
                         for attempt in range(3):
                             try:
                                 res = client.models.generate_content(
@@ -444,11 +462,9 @@ elif app_mode == "📸 2. 종이 설문지 AI 스캔 (교사용)":
                                         "점수_상담대상": d.get("점수_상담대상", 4), "비밀편지여부": d.get("비밀편지여부", "괜찮아요"),
                                         "하고싶은말": d.get("하고싶은말", ""), "제출방식": "AI 묶음스캔", "제출일시": datetime.now(KST).isoformat()
                                     })
-                                success_batch = True
                                 break
                             except Exception as e:
-                                err_str = str(e)
-                                if "503" in err_str and attempt < 2:
+                                if "503" in str(e) and attempt < 2:
                                     time.sleep(5)
                                     continue
                                 else:
@@ -457,7 +473,7 @@ elif app_mode == "📸 2. 종이 설문지 AI 스캔 (교사용)":
 
                         prog.progress((b_idx + 1) / total_batches)
                         if b_idx < total_batches - 1:
-                            time.sleep(3)  # 분당 요청 제한(RPM) 방지용 짧은 대기
+                            time.sleep(3)
 
                     if rows:
                         st.session_state["ocr_df"] = pd.DataFrame(rows)
@@ -548,20 +564,31 @@ elif app_mode == "📊 3. 통합 분석 & 변화 추적 (교사용)":
                     st.plotly_chart(px.line(t_df, x="survey_round", y="위기점수", markers=True, title="위기 점수 변화 추이"), use_container_width=True)
 
 # =========================================================
-# [모드 4] 엑셀 일괄 등록 및 회차 설정
+# [모드 4] 명렬표 · 설문 회차 · 교사 개별 API 키 설정
 # =========================================================
-elif app_mode == "📋 4. 엑셀로 명렬표 일괄 등록 & 회차 설정 (교사용)":
+elif app_mode == "📋 4. 명렬표·회차·API 키 설정 (교사용)":
     if require_teacher_auth():
-        st.title("📋 학급 명렬표 엑셀 업로드 & 회차 설정")
+        st.title(f"📋 [{active_class}] 학급 설정 관리")
 
-        st.subheader("1️⃣ 설문 회차 설정")
-        new_round = st.text_input("현재 회차명", value=st.session_state["active_round"])
-        if st.button("회차 저장"):
-            st.session_state["active_round"] = new_round
-            st.success("회차가 변경되었습니다.")
+        col_s1, col_s2 = st.columns(2)
+        with col_s1:
+            st.subheader("1️⃣ 설문 회차 설정")
+            new_round = st.text_input("현재 회차명", value=st.session_state["active_round"])
+            if st.button("회차 저장"):
+                st.session_state["active_round"] = new_round
+                st.success("회차가 변경되었습니다.")
+
+        with col_s2:
+            st.subheader("2️⃣ 내 학급 전용 Gemini API Key 등록/변경")
+            st.caption("다른 선생님과 API 무료 한도가 겹치지 않도록 본인의 API 키를 저장해 두세요.")
+            updated_key = st.text_input("개인 Gemini API Key", value=teacher_saved_api_key, type="password")
+            if st.button("🔑 내 API Key 저장하기"):
+                update_teacher_api_key(active_class, updated_key.strip())
+                st.success("✅ 학급 전용 API Key가 저장되었습니다!")
+                st.rerun()
 
         st.divider()
-        st.subheader("2️⃣ 엑셀로 학생 명렬표 일괄 등록")
+        st.subheader("3️⃣ 엑셀로 학생 명렬표 일괄 등록")
         st.markdown("엑셀 파일에 **`student_no`**(출석번호)와 **`name`**(이름) 두 개의 열(Column)만 포함하여 업로드해 주세요.")
 
         sample_r = pd.DataFrame({"student_no": [1, 2, 3], "name": ["김철수", "이영희", "박민수"]})

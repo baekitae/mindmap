@@ -590,4 +590,21 @@ elif app_mode == "📋 4. 명렬표·회차·API 키 설정 (교사용)":
         st.download_button("📥 명렬표 업로드용 엑셀 양식 다운로드", data=to_excel_bytes(sample_r), file_name="명렬표_업로드양식.xlsx")
 
         up_excel = st.file_uploader("작성된 명렬표 엑셀 파일 업로드 (.xlsx)", type=["xlsx"])
-        if up_excel is not None
+        if up_excel is not None:
+            up_df = pd.read_excel(up_excel)
+            if "student_no" in up_df.columns and "name" in up_df.columns:
+                st.success(f"총 {len(up_df)}명의 학생 명렬표가 확인되었습니다.")
+                st.dataframe(up_df, use_container_width=True)
+                if st.button("💾 이 명렬표를 Supabase DB에 일괄 등록하기", type="primary"):
+                    save_roster(active_class, up_df)
+                    st.success("✅ 명렬표 등록이 완료되었습니다! 이제 학생용 설문에서 드롭다운으로 선택할 수 있습니다.")
+                    st.rerun()
+            else:
+                st.error("⚠️ 엑셀 파일 안에 'student_no'와 'name' 열 이름이 정확히 있어야 합니다.")
+
+        st.divider()
+        st.subheader("현재 등록된 학생 명렬표 보기")
+        if not roster_df.empty:
+            st.dataframe(roster_df, use_container_width=True)
+        else:
+            st.info("등록된 학생이 없습니다. 위에서 명렬표를 업로드해주세요.")

@@ -12,3 +12,4 @@ pdf2image
 poppler-utils
 streamlit
 pandas
+PyMuPDF

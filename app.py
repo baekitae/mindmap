@@ -44,7 +44,7 @@ def init_supabase() -> Client | None:
 supabase = init_supabase()
 
 # ---------------------------------------------------------
-# 1. Gemini Vision OCR 스키마
+# 1. Gemini Vision OCR 스키마 (1~3순위 및 이유 인식 강화)
 # ---------------------------------------------------------
 class SurveyExtraction(BaseModel):
     이름: str = Field(description="학생 이름 (미기재 시 '미기재')")
@@ -54,11 +54,11 @@ class SurveyExtraction(BaseModel):
     주요고민: list[str] = Field(description="체크된 고민 목록")
     짜증순간: list[str] = Field(description="짜증나는 순간 목록")
     필요한것: list[str] = Field(description="필요한 것 목록")
-    친한친구_1순위: str = Field(description="1순위로 친한 친구 이름")
-    친한친구_1순위_이유: str = Field(description="1순위 친구와 친한 이유")
-    친한친구_2순위: str = Field(description="2순위로 친한 친구 이름")
+    친한친구_1순위: str = Field(description="가장 친한 친구 1순위 이름")
+    친한친구_1순위_이유: str = Field(description="1순위 친구와 친한 이유 또는 특징")
+    친한친구_2순위: str = Field(description="2순위 친구 이름")
     친한친구_2순위_이유: str = Field(description="2순위 친구와 친한 이유")
-    친한친구_3순위: str = Field(description="3순위로 친한 친구 이름")
+    친한친구_3순위: str = Field(description="3순위 친구 이름")
     친한친구_3순위_이유: str = Field(description="3순위 친구와 친한 이유")
     자주노는친구: str = Field(description="쉬는 시간이나 놀이 시간에 함께 노는 친구 이름 (쉼표 구분)")
     친해지고싶은친구: str = Field(description="앞으로 더 친해지고 싶은 친구 이름 (쉼표 구분)")
@@ -161,7 +161,6 @@ def analyze_student_metrics(df: pd.DataFrame) -> pd.DataFrame:
     in_degree_distant = {name: 0 for name in df["이름"]}
 
     for _, row in df.iterrows():
-        # 순위별 가중치 부여 (1순위: 3점, 2순위: 2점, 3순위: 1점)
         for col, weight in [("친한친구_1순위", 3), ("친한친구_2순위", 2), ("친한친구_3순위", 1)]:
             if col in row and pd.notna(row[col]) and str(row[col]).strip() in in_degree_close:
                 target = str(row[col]).strip()
@@ -277,7 +276,7 @@ def require_teacher_auth() -> bool:
     return False
 
 # =========================================================
-# [모드 1] 학생용 설문 참여 (1~3순위 + 이유 입력형 개편)
+# [모드 1] 학생용 설문 참여
 # =========================================================
 if app_mode == "👦 1. 학생용 설문 참여":
     st.title(f"🌈 [{active_class}] 우리들의 마음 & 친구 관계 이야기")
@@ -359,9 +358,6 @@ if app_mode == "👦 1. 학생용 설문 참여":
 
                 st.divider()
 
-                # -------------------------------------------------
-                # [3장 개편] 1~3순위 친한 친구 선택 및 이유 적기
-                # -------------------------------------------------
                 st.markdown("### 🤝 [3부] 우리들의 친구 관계 이야기 (1~3순위 & 이유)")
                 st.caption("우리 반에서 가장 마음이 편하고 친하게 지내는 친구 3명을 순위별로 적고, 왜 친한지 이유를 남겨주세요.")
 
@@ -444,7 +440,7 @@ if app_mode == "👦 1. 학생용 설문 참여":
                         "멀리있는친구": ", ".join(distant_friends),
                         "관계어려움": ", ".join(rel_diff_sel) if rel_diff_sel else "특별히 어려운 점은 없어요.",
                         "점수_즐거움": 4, "점수_힘든친구": 1, "점수_상담대상": 4,
-                        "비밀편지여부": "비밀이에요!" if "비밀이에요!" in secret_opt else "괜찮아요",
+                        "비밀편지여부": "비밀이에요!" if "비밀" in secret_opt else "괜찮아요",
                         "하고싶은말": final_free_text,
                         "제출방식": "크롬북/태블릿 웹설문",
                         "제출일시": datetime.now(KST).isoformat()
@@ -456,7 +452,7 @@ if app_mode == "👦 1. 학생용 설문 참여":
         st.warning("⚠️ 등록된 학생 명렬표가 없습니다. [📋 4. 명렬표·회차·API 키 설정] 메뉴에서 먼저 명렬표를 등록해주세요.")
 
 # =========================================================
-# [모드 2] 종이 설문지 AI 스캔
+# [모드 2] 종이 설문지 AI 스캔 (1~3순위 필드 매핑 완벽 보완)
 # =========================================================
 elif app_mode == "📸 2. 종이 설문지 AI 스캔 (교사용)":
     if require_teacher_auth():
@@ -510,7 +506,7 @@ elif app_mode == "📸 2. 종이 설문지 AI 스캔 (교사용)":
                         contents_payload = [types.Part.from_bytes(data=img_b, mime_type="image/jpeg") for img_b in batch_imgs]
                         prompt = (
                             f"제공된 {len(batch_imgs)}장의 초등학생 설문지 이미지를 순서대로 분석하세요. "
-                            f"우리 반 명단[{', '.join(student_list)}]을 참고하여 이름, 1~3순위 친구 이름과 이유, 체크 항목들을 정확히 읽어내어 JSON으로 반환하세요."
+                            f"우리 반 명단[{', '.join(student_list)}]을 참고하여 이름, 1~3순위 친구 이름과 각각의 이유, 그리고 체크 항목들과 서술형 답변을 정확히 읽어내어 JSON으로 반환하세요."
                         )
                         contents_payload.append(prompt)
 
@@ -558,7 +554,7 @@ elif app_mode == "📸 2. 종이 설문지 AI 스캔 (교사용)":
                 st.download_button("📥 엑셀 다운로드", data=to_excel_bytes(edited_df), file_name=f"AI스캔_{ocr_round}.xlsx", use_container_width=True)
 
 # =========================================================
-# [모드 3] 통합 분석 대시보드 (성별 구분 소시오그램 & 순위 가중치)
+# [모드 3] 통합 분석 대시보드
 # =========================================================
 elif app_mode == "📊 3. 통합 분석 & 변화 추적 (교사용)":
     if require_teacher_auth():
@@ -587,7 +583,6 @@ elif app_mode == "📊 3. 통합 분석 & 변화 추적 (교사용)":
             with t2:
                 rel_type = st.radio("관계 유형", ["💖 친한 친구 (1~3순위 가중치)", "🏃 자주 함께 노는 친구", "🌟 더 친해지고 싶은 친구", "💔 멀리 있는 친구"], horizontal=True)
                 
-                # 열 매핑 (1순위~3순위 통합 분석 지원)
                 if "친한 친구" in rel_type:
                     col_map_list = [("친한친구_1순위", 3, "#2ECC71"), ("친한친구_2순위", 2, "#27AE60"), ("친한친구_3순위", 1, "#1E8449")]
                 else:
@@ -615,22 +610,19 @@ elif app_mode == "📊 3. 통합 분석 & 변화 추적 (교사용)":
                                         G.add_edge(row["이름"], target, weight=weight)
 
                 pos = nx.spring_layout(G, k=0.8, seed=42)
-                
-                # 에지(선) 그리기
                 edge_x, edge_y = [], []
                 for u, v, data in G.edges(data=True):
                     edge_x.extend([pos[u][0], pos[v][0], None])
                     edge_y.extend([pos[u][1], pos[v][1], None])
 
-                # 노드 색상 부여 (남: 파란계열, 여: 분홍계열, 미기재: 회색)
                 node_colors = []
                 node_sizes = []
                 in_degrees = dict(G.in_degree(weight='weight'))
                 for n in G.nodes():
                     gender = G.nodes[n].get("gender", "미기재")
-                    if "남" in gender: node_colors.append("#3498DB")      # 파란색 (남학생)
-                    elif "여" in gender: node_colors.append("#E91E63")    # 분홍색 (여학생)
-                    else: node_colors.append("#95A5A6")                 # 회색
+                    if "남" in gender: node_colors.append("#3498DB")
+                    elif "여" in gender: node_colors.append("#E91E63")
+                    else: node_colors.append("#95A5A6")
                     node_sizes.append(22 + in_degrees.get(n, 0) * 3)
 
                 fig = go.Figure(data=[
@@ -644,7 +636,6 @@ elif app_mode == "📊 3. 통합 분석 & 변화 추적 (교사용)":
                 st.plotly_chart(fig, use_container_width=True)
                 st.caption("🔵 파란색 노드: 남학생 | 핑크색 노드: 여학생 | 노드 크기: 받은 지목 가중치 반영")
 
-                # 자동 결과 해석
                 st.divider()
                 st.subheader("📋 소시오그램 결과 요약")
                 sorted_in = sorted(in_degrees.items(), key=lambda x: x[1], reverse=True)
@@ -687,7 +678,7 @@ elif app_mode == "📊 3. 통합 분석 & 변화 추적 (교사용)":
                     st.plotly_chart(px.line(t_df, x="survey_round", y="위기점수", markers=True, title="위기 점수 변화 추이"), use_container_width=True)
 
 # =========================================================
-# [모드 4] 명렬표 · 회차 · API 키 설정 (성별 gender 열 추가 양식 지원)
+# [모드 4] 명렬표 · 회차 · API 키 설정
 # =========================================================
 elif app_mode == "📋 4. 명렬표·회차·API 키 설정 (교사용)":
     if require_teacher_auth():

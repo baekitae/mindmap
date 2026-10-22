@@ -8,3 +8,4 @@ google-genai
 pillow
 pydantic
 supabase
+pdf2image

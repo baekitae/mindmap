@@ -61,6 +61,8 @@ SUPPORT_CONTACT = "support@example.com"  # 판매 시 실제 문의처로 변경
 
 KST = timezone(timedelta(hours=9))
 TEACHER_SESSION_MINUTES = 30
+STUDENT_SESSION_MINUTES = 10
+STUDENT_PIN_LEN = 4
 MAX_LOGIN_ATTEMPTS = 5
 LOCK_SECONDS = 60
 MAX_RISK_SCORE = 29
@@ -170,6 +172,25 @@ h1, h2, h3 {{ letter-spacing: -0.02em; }}
 .b-danger {{ background:#FDE7E8; color:#B4262B; }} .b-muted {{ background:#F1F2F4; color:{C['muted']}; }}
 
 /* 위젯 */
+/* 입력칸 (config.toml 없이도 동일하게 보이도록) */
+[data-baseweb="input"], [data-baseweb="base-input"], [data-baseweb="textarea"], [data-baseweb="select"] > div {{
+  background: #FFFFFF !important; border: 1px solid #D5DAE6 !important; border-radius: 10px !important; }}
+[data-baseweb="input"] input, [data-baseweb="base-input"] input, [data-baseweb="textarea"] textarea {{ background: transparent !important; }}
+[data-baseweb="input"]:focus-within, [data-baseweb="textarea"]:focus-within, [data-baseweb="select"] > div:focus-within {{
+  border-color: {C['primary']} !important; box-shadow: 0 0 0 3px {C['primary_soft']} !important; }}
+input::placeholder, textarea::placeholder {{ color: #A0A7B8 !important; }}
+/* 버튼 색 */
+button[kind="primary"], button[kind="primaryFormSubmit"],
+button[data-testid="stBaseButton-primary"], button[data-testid="stBaseButton-primaryFormSubmit"] {{
+  background: {C['primary']} !important; border-color: {C['primary']} !important; color: #FFFFFF !important; }}
+button[kind="primary"]:hover, button[kind="primaryFormSubmit"]:hover,
+button[data-testid="stBaseButton-primary"]:hover, button[data-testid="stBaseButton-primaryFormSubmit"]:hover {{
+  background: {C['primary_dark']} !important; border-color: {C['primary_dark']} !important; }}
+button[kind="secondary"], button[kind="secondaryFormSubmit"],
+button[data-testid="stBaseButton-secondary"], button[data-testid="stBaseButton-secondaryFormSubmit"] {{
+  background: #FFFFFF !important; border: 1px solid #D5DAE6 !important; color: {C['ink']} !important; }}
+button[kind="secondary"]:hover, button[data-testid="stBaseButton-secondary"]:hover {{
+  border-color: {C['primary']} !important; color: {C['primary_dark']} !important; }}
 .stButton > button, [data-testid="stFormSubmitButton"] > button, .stDownloadButton > button {{
   border-radius: 12px; font-weight: 700; padding: .55rem 1.1rem; transition: all .15s ease; }}
 .stButton > button:hover, [data-testid="stFormSubmitButton"] > button:hover {{ transform: translateY(-1px); }}
@@ -390,6 +411,17 @@ def update_class(code, fields: dict):
     get_class_public.clear()
 
 
+def find_class_codes(school, teacher, pin) -> list[dict]:
+    """학교명 + 선생님 성함 + 비밀번호가 모두 맞는 학급만 돌려줌"""
+    try:
+        res = db().table("teacher_classes").select("class_code, class_name, school_name, pin_code") \
+            .eq("school_name", school).eq("teacher_name", teacher).execute()
+    except Exception:
+        return []
+    return [{"class_code": r["class_code"], "class_name": r.get("class_name") or r["class_code"]}
+            for r in (res.data or []) if verify_pin(pin, r.get("pin_code") or "")]
+
+
 def verify_teacher(code, pin) -> bool:
     row = _fetch_class_row(code)
     if not row:
@@ -451,10 +483,79 @@ def save_roster(code: str, df: pd.DataFrame):
         records.append({"class_code": code, "student_no": s_no, "name": name, "gender": normalize_gender(row.get("gender", ""))})
     if not records:
         raise ValueError("등록할 학생이 없습니다.")
+    old_pins = load_student_pins(code)  # 명렬표를 다시 올려도 기존 학생 비밀번호는 유지
+    for r in records:
+        old = old_pins.get(r["name"])
+        if old and old.get("pin_hash"):
+            r["pin_hash"] = old["pin_hash"]
+            r["pin_enc"] = old.get("pin_enc") or ""
     db().table("student_roster").delete().eq("class_code", code).execute()
     db().table("student_roster").insert(records).execute()
     load_roster.clear()
     return len(records)
+
+
+def load_student_pins(code: str) -> dict:
+    """{이름: {pin_hash, pin_enc}} — 컬럼이 없으면(마이그레이션 전) 빈 dict"""
+    try:
+        res = db().table("student_roster").select("name, pin_hash, pin_enc").eq("class_code", code).execute()
+        return {r["name"]: r for r in (res.data or [])}
+    except Exception:
+        return {}
+
+
+def class_uses_student_pin(code: str) -> bool:
+    return any(v.get("pin_hash") for v in load_student_pins(code).values())
+
+
+def gen_student_pin() -> str:
+    weak = {"1234", "4321", "0123", "3210", "9876", "6789", "1004", "0000"}
+    while True:
+        p = "".join(pysecrets.choice(string.digits) for _ in range(STUDENT_PIN_LEN))
+        if len(set(p)) > 1 and p not in weak:
+            return p
+
+
+def set_student_pins(code: str, mapping: dict):
+    for name, pin in mapping.items():
+        db().table("student_roster").update(
+            {"pin_hash": hash_pin(pin), "pin_enc": encrypt_text(pin) or ""}
+        ).eq("class_code", code).eq("name", name).execute()
+
+
+def clear_student_pins(code: str):
+    db().table("student_roster").update({"pin_hash": None, "pin_enc": None}).eq("class_code", code).execute()
+
+
+def verify_student(code: str, name: str, pin: str) -> bool:
+    row = load_student_pins(code).get(name) or {}
+    return verify_pin(pin, row.get("pin_hash") or "")
+
+
+def pin_cards_html(rows, title, code, link=""):
+    cards = "".join(
+        f'<div class="c"><div class="t">🌤️ {esc(title)}</div><div class="n">{esc(no)}번 {esc(name)}</div>'
+        f'<div class="row"><div><div class="l">학급 코드</div><div class="v">{esc(code)}</div></div>'
+        f'<div><div class="l">내 비밀번호</div><div class="p">{esc(pin)}</div></div></div>'
+        f'<div class="f">친구에게 보여주지 마세요 🤫</div></div>'
+        for no, name, pin in rows
+    )
+    link_html = f"<div class='noprint' style='margin-top:6px;color:#6B7280'>입장 주소: {esc(link)}</div>" if link else ""
+    return f"""<!doctype html><html lang="ko"><head><meta charset="utf-8"><title>{esc(title)} 학생 비밀번호 카드</title>
+<style>
+@import url('https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/variable/pretendardvariable-dynamic-subset.min.css');
+body{{font-family:'Pretendard Variable',Pretendard,sans-serif;margin:16px;color:#1F2937}}
+.bar{{margin-bottom:14px}} .bar button{{font:inherit;font-weight:700;padding:8px 16px;border-radius:10px;border:0;background:#4F6BED;color:#fff;cursor:pointer}}
+.g{{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}}
+.c{{border:2px dashed #9AA6F5;border-radius:14px;padding:12px 14px;break-inside:avoid}}
+.t{{font-size:11px;color:#6B7280}} .n{{font-size:18px;font-weight:800;margin:4px 0 8px}}
+.row{{display:flex;justify-content:space-between}} .l{{font-size:11px;color:#6B7280}}
+.v{{font-size:15px;font-weight:700;letter-spacing:.08em}} .p{{font-size:24px;font-weight:800;letter-spacing:.2em;color:#4F6BED}}
+.f{{font-size:11px;color:#9A6614;margin-top:8px}}
+@media print{{.noprint{{display:none}} @page{{size:A4;margin:10mm}}}}
+</style></head><body>
+<div class="bar noprint"><button onclick="window.print()">🖨️ 인쇄하기</button> &nbsp;점선을 따라 잘라 학생에게 나눠 주세요.</div>{link_html}
+<div class="g">{cards}</div></body></html>"""
 
 
 @st.cache_data(ttl=20, show_spinner=False)
@@ -793,6 +894,7 @@ for k, v in {
     "class_code": "", "teacher_auth": False, "last_active": 0.0,
     "login_fail": 0, "lock_until": 0.0, "survey_nonce": 0, "letter_nonce": 0,
     "survey_done": None, "letter_done": False, "new_class_code": None,
+    "student_name": None, "student_last": 0.0, "stu_fail": 0, "stu_lock": 0.0, "new_pins": {},
 }.items():
     if k not in ss:
         ss[k] = v
@@ -807,6 +909,8 @@ def enter_class(code_raw: str) -> bool:
         return False
     if ss.class_code != info["class_code"]:
         ss.teacher_auth = False
+        ss.student_name = None
+        ss.new_pins = {}
         ss.pop("ocr_df", None)
     ss.class_code = info["class_code"]
     return True
@@ -815,6 +919,8 @@ def enter_class(code_raw: str) -> bool:
 def leave_class():
     ss.class_code = ""
     ss.teacher_auth = False
+    ss.student_name = None
+    ss.new_pins = {}
     ss.pop("ocr_df", None)
     try:
         st.query_params.clear()
@@ -829,6 +935,11 @@ def teacher_login(code, pin) -> bool:
         return False
     if verify_teacher(code, pin):
         ss.teacher_auth = True
+        ss.student_name = None
+        try:
+            st.query_params["class"] = code  # 이 주소를 즐겨찾기하면 다음엔 비밀번호만 입력
+        except Exception:
+            pass
         ss.last_active = now
         ss.login_fail = 0
         return True
@@ -842,7 +953,30 @@ def teacher_login(code, pin) -> bool:
 
 def teacher_logout():
     ss.teacher_auth = False
+    ss.new_pins = {}
     ss.pop("ocr_df", None)
+
+
+def student_login(code, name, pin, uses_pin) -> bool:
+    now = time.time()
+    if now < ss.stu_lock:
+        st.error(f"비밀번호를 여러 번 틀렸어요. {int(ss.stu_lock - now)}초 뒤에 다시 해 보세요.")
+        return False
+    if not uses_pin or verify_student(code, name, pin):
+        ss.student_name = name
+        ss.student_last = now
+        ss.stu_fail = 0
+        return True
+    ss.stu_fail += 1
+    if ss.stu_fail >= MAX_LOGIN_ATTEMPTS:
+        ss.stu_lock = now + LOCK_SECONDS
+        ss.stu_fail = 0
+    st.error("비밀번호가 맞지 않아요. 선생님께 받은 카드를 다시 확인해 보세요.")
+    return False
+
+
+def student_logout():
+    ss.student_name = None
 
 
 # 링크/QR 입장 (?class=CODE)
@@ -860,6 +994,14 @@ if ss.teacher_auth:
         st.toast("🔒 보안을 위해 교사 모드가 자동 로그아웃되었습니다.")
     else:
         ss.last_active = time.time()
+
+# 학생 세션 자동 만료 (공용 기기 대비)
+if ss.student_name:
+    if time.time() - ss.student_last > STUDENT_SESSION_MINUTES * 60:
+        student_logout()
+        st.toast("🔒 시간이 지나 자동으로 로그아웃되었어요.")
+    else:
+        ss.student_last = time.time()
 
 
 # =========================================================
@@ -890,7 +1032,42 @@ with st.sidebar:
                 st.error("학급 코드를 찾을 수 없어요. 다시 확인해 주세요.")
 
         st.divider()
-        with st.expander("👩‍🏫 선생님: 새 학급 만들기"):
+        with st.expander("👩‍🏫 선생님 로그인", expanded=True):
+            with st.form("teacher_quick_login", border=False):
+                tl_code = st.text_input("학급 코드", placeholder="예: K7Q2MX")
+                tl_pin = st.text_input("교사 비밀번호", type="password")
+                tl_ok = st.form_submit_button("로그인", type="primary", use_container_width=True)
+            if tl_ok:
+                info = get_class_public(tl_code.strip()) or get_class_public(tl_code.strip().upper())
+                if not info:
+                    st.error("학급 코드를 찾을 수 없습니다.")
+                elif teacher_login(info["class_code"], tl_pin):
+                    enter_class(info["class_code"])
+                    ss.teacher_auth = True
+                    ss.last_active = time.time()
+                    st.rerun()
+            if st.toggle("학급 코드를 잊었어요", key="forgot_code"):
+                with st.form("find_code_form", border=False):
+                    f_school = st.text_input("학교명")
+                    f_teacher = st.text_input("선생님 성함")
+                    f_pin = st.text_input("교사 비밀번호", type="password", key="find_pin")
+                    f_ok = st.form_submit_button("내 학급 찾기", use_container_width=True)
+                if f_ok:
+                    if time.time() < ss.lock_until:
+                        st.error("시도가 많아 잠시 잠겼습니다. 잠시 후 다시 시도하세요.")
+                    else:
+                        found = find_class_codes(f_school.strip(), f_teacher.strip(), f_pin)
+                        if found:
+                            ss.login_fail = 0
+                            st.success("찾았어요!\n\n" + "\n".join(f"- {esc(x['class_name'])}: **{x['class_code']}**" for x in found))
+                        else:
+                            ss.login_fail += 1
+                            if ss.login_fail >= MAX_LOGIN_ATTEMPTS:
+                                ss.lock_until = time.time() + LOCK_SECONDS
+                                ss.login_fail = 0
+                            st.error("일치하는 학급이 없습니다. 학급을 만들 때 입력한 학교명·성함 그대로 입력해 주세요.")
+
+        with st.expander("➕ 새 학급 만들기"):
             with st.form("new_class_form", clear_on_submit=True, border=False):
                 n_school = st.text_input("학교명", placeholder="예: 해솔초등학교")
                 n_class = st.text_input("학급명", placeholder="예: 3학년 7반")
@@ -932,8 +1109,18 @@ with st.sidebar:
                 teacher_logout()
                 st.rerun()
             st.caption("학생에게 기기를 넘기기 전에 꼭 로그아웃해 주세요.")
-        else:
+        elif ss.student_name:
+            st.markdown(badge(f"👋 {ss.student_name}", "ok"), unsafe_allow_html=True)
+            st.write("")
             page = st.radio("메뉴", STUDENT_PAGES, key="nav_student", label_visibility="collapsed")
+            st.divider()
+            if st.button("🚪 로그아웃", use_container_width=True, type="primary"):
+                student_logout()
+                st.rerun()
+            st.caption("다 했으면 꼭 로그아웃해서 다음 친구에게 넘겨 주세요.")
+        else:
+            page = "student_login"
+        if not ss.teacher_auth:
             st.divider()
             with st.expander("👩‍🏫 선생님 로그인"):
                 pin_try = st.text_input("교사 비밀번호", type="password", key=f"pin_{cls['class_code']}")
@@ -966,8 +1153,8 @@ def page_landing():
         with s2:
             step_header(2, "명렬표 등록", "엑셀 양식에 출석번호·이름·성별을 넣어 올려요.")
         with s3:
-            step_header(3, "학생 참여", "학급 코드나 QR을 학생들에게 알려주면 바로 설문에 참여해요.")
-    st.info("👈 학생은 선생님이 알려준 **학급 코드**를 왼쪽에 입력하세요.")
+            step_header(3, "학생 참여", "학생 비밀번호 카드를 인쇄해 나눠 주면, 학생은 이름과 비밀번호로 로그인해 참여해요.")
+    st.info("👈 **학생**은 선생님이 알려준 학급 코드를, **선생님**은 학급 코드와 비밀번호를 왼쪽에 입력하세요.")
     footer()
 
 
@@ -1006,30 +1193,72 @@ def checkbox_group(options, key_prefix, skip_word=None):
     return sel
 
 
+def page_student_login():
+    hero(f"{class_title(cls)}", "내 이름을 고르고 선생님께 받은 비밀번호를 입력해요.", "👋")
+    if ss.survey_done:
+        st.balloons()
+        st.success(f"🎉 {ss.survey_done} 학생, 설문을 잘 제출했어요. 고마워요! 안전하게 로그아웃되었어요.")
+        ss.survey_done = None
+    if ss.letter_done:
+        st.success("🔒 비밀 편지가 선생님께 안전하게 전달되었어요. 용기 내줘서 고마워요 ❤️ 안전하게 로그아웃되었어요.")
+        ss.letter_done = False
+    if not roster_names:
+        empty_roster_notice()
+        footer()
+        return
+    uses_pin = class_uses_student_pin(CODE)
+    _, mid, _ = st.columns([1, 2, 1])
+    with mid, st.container(border=True):
+        with st.form("student_login_form", border=False):
+            step_header(1, "내 이름 고르기")
+            sel = st.selectbox("내 이름", ["-- 내 이름을 선택하세요 --"] + list(display_to_name.keys()),
+                               label_visibility="collapsed")
+            pin = ""
+            if uses_pin:
+                step_header(2, "내 비밀번호", f"선생님께 받은 숫자 {STUDENT_PIN_LEN}자리")
+                pin = st.text_input("비밀번호", type="password", max_chars=STUDENT_PIN_LEN,
+                                    label_visibility="collapsed", placeholder="● ● ● ●")
+            ok = st.form_submit_button("시작하기 ➜", type="primary", use_container_width=True)
+        if ok:
+            if sel not in display_to_name:
+                st.warning("내 이름을 먼저 골라 주세요.")
+            elif uses_pin and not pin.strip():
+                st.warning("비밀번호를 입력해 주세요.")
+            elif student_login(CODE, display_to_name[sel], pin.strip(), uses_pin):
+                st.rerun()
+        if not uses_pin:
+            st.caption("이 학급은 아직 학생 비밀번호를 쓰지 않아요.")
+    st.write("")
+    st.caption("비밀번호를 잊어버렸다면 선생님께 말해 주세요. 선생님이 새로 만들어 줄 수 있어요.")
+    footer()
+
+
 def page_student_survey(preview=False):
     if preview:
         st.info("👀 **미리보기 모드** — 학생에게 보이는 화면 그대로입니다. 여기서 제출해도 저장되지 않아요.")
     hero(f"{class_title(cls)} 마음 & 친구 이야기",
          "솔직한 마음을 적어주면 선생님이 더 잘 이해하고 도와줄게요. 모든 감정은 소중해요!", "🌈")
 
-    if ss.survey_done:
-        st.balloons()
-        st.success(f"🎉 {ss.survey_done} 학생, 설문을 제출했어요. 고마워요!")
-        ss.survey_done = None
-
     if not roster_names:
         empty_roster_notice()
         return
 
     n = ss.survey_nonce
-    with st.container(border=True):
-        step_header(1, "내 이름 선택하기", "출석번호와 이름을 골라주세요.")
-        sel = st.selectbox("내 이름", ["-- 내 이름을 선택하세요 --"] + list(display_to_name.keys()),
-                           key=f"me_{n}", label_visibility="collapsed")
-    if sel not in display_to_name:
-        footer()
-        return
-    my_name = display_to_name[sel]
+    if preview:
+        with st.container(border=True):
+            step_header(1, "미리볼 학생 선택", "학생은 로그인한 이름으로 자동 설정됩니다.")
+            sel = st.selectbox("학생", ["-- 학생을 선택하세요 --"] + list(display_to_name.keys()),
+                               key=f"me_{n}", label_visibility="collapsed")
+        if sel not in display_to_name:
+            footer()
+            return
+        my_name = display_to_name[sel]
+    else:
+        my_name = ss.student_name
+        if my_name not in roster_names:
+            student_logout()
+            st.rerun()
+        st.markdown(f"#### 👋 {esc(my_name)} 학생, 반가워요!")
     others = [x for x in roster_names if x != my_name]
 
     prev = round_latest(load_responses(CODE), ROUND)
@@ -1183,6 +1412,7 @@ def page_student_survey(preview=False):
             return
         ss.survey_done = my_name
         ss.survey_nonce += 1
+        student_logout()  # 공용 기기에서 다음 학생이 이어서 쓰지 않도록 자동 로그아웃
         st.rerun()
     footer()
 
@@ -1192,30 +1422,24 @@ def page_student_survey(preview=False):
 # =========================================================
 def page_student_letter():
     hero("선생님께 비밀 편지", "친구들은 볼 수 없어요. 선생님만 조용히 읽고 꼭 도와줄게요.", "🔒")
-    if ss.letter_done:
-        st.success("🔒 비밀 편지가 선생님께 안전하게 전달되었어요. 용기 내줘서 고마워요 ❤️")
-        ss.letter_done = False
-    if not roster_names:
-        empty_roster_notice()
-        return
+    my_name = ss.student_name
     n = ss.letter_nonce
     with st.container(border=True):
-        sel = st.selectbox("내 이름", ["-- 내 이름을 선택하세요 --"] + list(display_to_name.keys()), key=f"lt_me_{n}")
+        st.markdown(f"**보내는 사람:** {esc(my_name)}")
         content = st.text_area("편지 내용", height=200, key=f"lt_ct_{n}",
                                placeholder="예: 요즘 친구 때문에 속상한 일이 있어요... / 선생님과 따로 이야기하고 싶어요.")
         if st.button("💌 선생님께 보내기", type="primary", use_container_width=True):
-            if sel not in display_to_name:
-                st.warning("내 이름을 먼저 골라주세요.")
-            elif not content.strip():
+            if not content.strip():
                 st.warning("편지 내용을 적어주세요.")
             else:
                 try:
-                    insert_secret_letter(CODE, display_to_name[sel], content.strip())
+                    insert_secret_letter(CODE, my_name, content.strip())
                 except Exception as e:
                     st.error(f"전송 중 문제가 생겼어요. 선생님께 직접 말해 주세요. ({e})")
                     return
                 ss.letter_done = True
                 ss.letter_nonce += 1
+                student_logout()
                 st.rerun()
     st.markdown(
         '<div class="help-box">🆘 <b>지금 많이 힘들다면</b> 편지를 기다리지 말고 바로 선생님이나 보호자에게 말해 주세요. '
@@ -1669,9 +1893,105 @@ def page_letters():
 # =========================================================
 # 15. 교사: 학급 설정
 # =========================================================
+def page_student_pins_tab():
+    if roster_df.empty:
+        st.info("먼저 명렬표를 등록해 주세요.")
+        return
+    pins = load_student_pins(CODE)
+    if not pins and not roster_df.empty:
+        st.error("학생 비밀번호 컬럼이 없습니다. schema.sql의 학생 비밀번호 부분을 Supabase에서 실행해 주세요.")
+        return
+    has = {n for n, v in pins.items() if v.get("pin_hash")}
+    total = len(roster_df)
+
+    with st.container(border=True):
+        st.markdown("#### 학생 로그인 비밀번호")
+        st.markdown(
+            (badge(f"사용 중 · {len(has)}/{total}명 발급", "ok") if has else badge("미사용 · 이름만 고르면 입장", "warn")),
+            unsafe_allow_html=True,
+        )
+        st.caption(f"숫자 {STUDENT_PIN_LEN}자리 비밀번호를 한 번에 만들어 카드로 인쇄해 나눠 줄 수 있어요. "
+                   "한 명이라도 발급되면 모든 학생이 비밀번호로 로그인해야 하니, 전체 발급을 권장합니다.")
+        if _fernet is None:
+            st.warning("서버 암호화 키(APP_ENCRYPTION_KEY)가 없어 비밀번호는 **만든 직후에만** 볼 수 있어요. 바로 인쇄하거나 엑셀로 받아 두세요.")
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            confirm_all = st.checkbox("기존 비밀번호를 모두 바꿔도 좋아요", value=not has, key="pin_conf_all")
+            if st.button("🎲 전체 새로 만들기", type="primary", use_container_width=True, disabled=not confirm_all):
+                new = {n: gen_student_pin() for n in roster_df["name"]}
+                with st.spinner("비밀번호 만드는 중..."):
+                    set_student_pins(CODE, new)
+                ss.new_pins = new
+                st.success(f"✅ {len(new)}명 발급 완료! 아래에서 카드를 인쇄하세요.")
+        with c2:
+            missing = [n for n in roster_df["name"] if n not in has]
+            if st.button(f"➕ 없는 학생만 만들기 ({len(missing)}명)", use_container_width=True, disabled=not missing):
+                new = {n: gen_student_pin() for n in missing}
+                with st.spinner("비밀번호 만드는 중..."):
+                    set_student_pins(CODE, new)
+                ss.new_pins = {**ss.new_pins, **new}
+                st.success(f"✅ {len(new)}명 발급 완료!")
+        with c3:
+            with st.popover("비밀번호 사용 끄기", use_container_width=True, disabled=not has):
+                st.write("모든 학생 비밀번호를 지우고 이름만으로 입장하게 됩니다.")
+                if st.button("네, 끌게요", key="pin_clear"):
+                    clear_student_pins(CODE)
+                    ss.new_pins = {}
+                    st.rerun()
+
+    pins = load_student_pins(CODE)
+    rows = []
+    for r in roster_df.itertuples():
+        info = pins.get(r.name) or {}
+        pin = ss.new_pins.get(r.name) or decrypt_text(info.get("pin_enc") or "")
+        if not info.get("pin_hash"):
+            status, pin = "미발급", ""
+        elif pin:
+            status = "발급"
+        else:
+            status, pin = "발급(표시 불가)", "재발급 필요"
+        rows.append({"번호": r.student_no, "이름": r.name, "비밀번호": pin, "상태": status})
+    table = pd.DataFrame(rows)
+
+    with st.container(border=True):
+        st.markdown("#### 비밀번호 목록")
+        show = st.toggle("비밀번호 보기", value=False, help="학생들이 화면을 볼 수 있는 곳에서는 끄고 사용하세요.")
+        view = table.copy()
+        if not show:
+            view["비밀번호"] = view["비밀번호"].apply(lambda v: "●" * STUDENT_PIN_LEN if v and v.isdigit() else v)
+        st.dataframe(view, use_container_width=True, hide_index=True, height=360)
+
+        printable = [(row["번호"], row["이름"], row["비밀번호"]) for _, row in table.iterrows() if str(row["비밀번호"]).isdigit()]
+        link = f"{APP_BASE_URL.rstrip('/')}/?class={CODE}" if APP_BASE_URL else ""
+        d1, d2 = st.columns(2)
+        with d1:
+            st.download_button("🖨️ 인쇄용 비밀번호 카드 (HTML)", pin_cards_html(printable, class_title(cls), CODE, link).encode("utf-8"),
+                               file_name=f"{CODE}_학생비밀번호카드.html", mime="text/html",
+                               use_container_width=True, disabled=not printable)
+        with d2:
+            st.download_button("📥 비밀번호 목록 엑셀", to_excel_bytes(table, "학생비밀번호"),
+                               file_name=f"{CODE}_학생비밀번호.xlsx", use_container_width=True, disabled=not printable)
+        st.caption("카드 파일을 열면 인쇄 버튼이 있어요. A4 한 장에 학생 카드가 여러 장 들어갑니다.")
+
+    with st.container(border=True):
+        st.markdown("#### 한 명만 다시 만들기")
+        st.caption("비밀번호를 잊어버린 학생에게 새 비밀번호를 줄 때 사용하세요.")
+        r1, r2 = st.columns([3, 1])
+        with r1:
+            who = st.selectbox("학생", list(display_to_name.keys()), key="pin_reset_who", label_visibility="collapsed")
+        with r2:
+            if st.button("재발급", use_container_width=True):
+                name = display_to_name[who]
+                newpin = gen_student_pin()
+                set_student_pins(CODE, {name: newpin})
+                ss.new_pins = {**ss.new_pins, name: newpin}
+                st.success(f"**{name}** 학생의 새 비밀번호: **{newpin}**")
+
+
 def page_settings():
     hero("학급 설정", "학급 공유, 설문 회차, 명렬표, AI, 보안, 데이터 관리를 한곳에서.", "⚙️")
-    t1, t2, t3, t4, t5, t6 = st.tabs(["🔗 학급 공유", "🗓️ 설문 회차", "👥 명렬표", "🤖 AI 설정", "🔐 보안", "🗑️ 데이터 관리"])
+    t1, t2, t3, tp, t4, t5, t6 = st.tabs(["🔗 학급 공유", "🗓️ 설문 회차", "👥 명렬표", "🔑 학생 비밀번호",
+                                          "🤖 AI 설정", "🔐 보안", "🗑️ 데이터 관리"])
 
     with t1:
         with st.container(border=True):
@@ -1754,6 +2074,9 @@ def page_settings():
                 st.dataframe(roster_df.rename(columns={"student_no": "번호", "name": "이름", "gender": "성별"}),
                              use_container_width=True, hide_index=True)
 
+    with tp:
+        page_student_pins_tab()
+
     with t4:
         with st.container(border=True):
             st.markdown("#### Gemini API 키")
@@ -1830,5 +2153,8 @@ ROUTES = {
     "👀 학생 설문 미리보기": lambda: page_student_survey(preview=True),
 }
 if page in TEACHER_PAGES and not ss.teacher_auth:
-    page = STUDENT_PAGES[0]
-ROUTES.get(page or STUDENT_PAGES[0], page_student_survey)()
+    page = "student_login"
+if page in STUDENT_PAGES and not ss.student_name:
+    page = "student_login"
+ROUTES["student_login"] = page_student_login
+ROUTES.get(page or "student_login", page_student_login)()

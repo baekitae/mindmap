@@ -44,7 +44,7 @@ def init_supabase() -> Client | None:
 supabase = init_supabase()
 
 # ---------------------------------------------------------
-# 1. Gemini Vision OCR 스키마 (1~3순위 및 이유 인식 강화)
+# 1. Gemini Vision OCR 스키마
 # ---------------------------------------------------------
 class SurveyExtraction(BaseModel):
     이름: str = Field(description="학생 이름 (미기재 시 '미기재')")
@@ -55,7 +55,7 @@ class SurveyExtraction(BaseModel):
     짜증순간: list[str] = Field(description="짜증나는 순간 목록")
     필요한것: list[str] = Field(description="필요한 것 목록")
     친한친구_1순위: str = Field(description="가장 친한 친구 1순위 이름")
-    친한친구_1순위_이유: str = Field(description="1순위 친구와 친한 이유 또는 특징")
+    친한친구_1순위_이유: str = Field(description="1순위 친구와 친한 이유")
     친한친구_2순위: str = Field(description="2순위 친구 이름")
     친한친구_2순위_이유: str = Field(description="2순위 친구와 친한 이유")
     친한친구_3순위: str = Field(description="3순위 친구 이름")
@@ -264,6 +264,7 @@ app_mode = st.sidebar.radio(
     "메뉴 선택",
     [
         "👦 1. 학생용 설문 참여",
+        "🔒 5. 선생님과의 비밀 편지함",
         "📸 2. 종이 설문지 AI 스캔 (교사용)",
         "📊 3. 통합 분석 & 변화 추적 (교사용)",
         "📋 4. 명렬표·회차·API 키 설정 (교사용)"
@@ -276,7 +277,7 @@ def require_teacher_auth() -> bool:
     return False
 
 # =========================================================
-# [모드 1] 학생용 설문 참여
+# [모드 1] 학생용 설문 참여 (비밀 편지 문항 분리 완료 버전)
 # =========================================================
 if app_mode == "👦 1. 학생용 설문 참여":
     st.title(f"🌈 [{active_class}] 우리들의 마음 & 친구 관계 이야기")
@@ -397,13 +398,12 @@ if app_mode == "👦 1. 학생용 설문 참여":
 
                 st.divider()
 
-                st.markdown("### 💌 [4부] 마음속 이야기 & 비밀 편지")
-                happy_text = st.text_area("😊 1. 가장 기뻤던 일이나 자랑거리", placeholder="예: 모둠 활동을 잘 해냈어요!", height=70)
-                free_text = st.text_area("❤️ 2. 선생님이나 친구에게 하고 싶은 말 / 고민", placeholder="어떤 내용이든 편하게 적어주세요.", height=90)
+                st.markdown("### 💌 [4부] 마음속 이야기")
+                happy_text = st.text_area("😊 가장 기뻤던 일이나 자랑거리", placeholder="예: 모둠 활동을 잘 해냈어요!", height=70)
+                free_text = st.text_area("❤️ 선생님이나 친구에게 하고 싶은 말", placeholder="어떤 내용이든 편하게 적어주세요.", height=90)
+                st.info("💡 **안내:** 선생님께 꼭 숨기고 싶은 비밀 이야기나 깊은 고민이 있다면, 좌측 메뉴의 **[🔒 5. 선생님과의 비밀 편지함]**을 이용해 주세요!")
 
-                secret_opt = st.radio("🔒 비밀 편지 여부", ["😊 괜찮아요. (선생님과 같이 이야기해도 돼요.)", "🔒 비밀이에요! (선생님만 보고 저를 도와주세요.)"])
-
-                if st.form_submit_button("💌 작성 완료! 마음 편지 보내기", type="primary", use_container_width=True):
+                if st.form_submit_button("💌 일반 설문 제출하기", type="primary", use_container_width=True):
                     if worry_etc.strip(): worries_sel.append(f"기타: {worry_etc.strip()}")
                     if moment_etc.strip(): moments_sel.append(f"기타: {moment_etc.strip()}")
                     if need_etc.strip(): needs_sel.append(f"기타: {need_etc.strip()}")
@@ -412,7 +412,7 @@ if app_mode == "👦 1. 학생용 설문 참여":
                     combined_notes = []
                     if happy_text.strip(): combined_notes.append(f"[기쁜일/자랑] {happy_text.strip()}")
                     if distant_reason.strip(): combined_notes.append(f"[어려운친구이유] {distant_reason.strip()}")
-                    if free_text.strip(): combined_notes.append(f"[고민/하고싶은말] {free_text.strip()}")
+                    if free_text.strip(): combined_notes.append(f"[하고싶은말] {free_text.strip()}")
                     final_free_text = " / ".join(combined_notes) if combined_notes else ""
 
                     f1_val = friend_1 if friend_1 != "-- 선택하세요 --" else ""
@@ -440,19 +440,123 @@ if app_mode == "👦 1. 학생용 설문 참여":
                         "멀리있는친구": ", ".join(distant_friends),
                         "관계어려움": ", ".join(rel_diff_sel) if rel_diff_sel else "특별히 어려운 점은 없어요.",
                         "점수_즐거움": 4, "점수_힘든친구": 1, "점수_상담대상": 4,
-                        "비밀편지여부": "비밀이에요!" if "비밀" in secret_opt else "괜찮아요",
+                        "비밀편지여부": "괜찮아요",
                         "하고싶은말": final_free_text,
                         "제출방식": "크롬북/태블릿 웹설문",
                         "제출일시": datetime.now(KST).isoformat()
                     }
                     insert_responses([record])
                     st.balloons()
-                    st.success("🎉 소중한 마음 이야기가 선생님께 잘 전달되었습니다! 고마워요 ❤️")
+                    st.success("🎉 설문이 성공적으로 제출되었습니다!")
     else:
         st.warning("⚠️ 등록된 학생 명렬표가 없습니다. [📋 4. 명렬표·회차·API 키 설정] 메뉴에서 먼저 명렬표를 등록해주세요.")
 
 # =========================================================
-# [모드 2] 종이 설문지 AI 스캔 (1~3순위 필드 매핑 완벽 보완)
+# [모드 5] 선생님과의 비밀 편지함 (완전 분리된 독립 메뉴)
+# =========================================================
+elif app_mode == "🔒 5. 선생님과의 비밀 편지함":
+    st.title(f"🔒 [{active_class}] 선생님과의 비밀 편지함")
+    st.markdown(
+        "##### 🤫 **이곳은 오직 선생님과 너만의 1:1 비밀 소통 공간이야.**\n"
+        "친구들에게 말하기 힘든 고민, 속상한 일, 혹은 선생님에게만 꼭 하고 싶은 이야기가 있다면 편하게 적어 보내줘. "
+        "선생님이 조용히 읽고 꼭 도와줄게!"
+    )
+    st.divider()
+
+    # 교사 권한 확인 함수
+    is_teacher = st.session_state["is_teacher_auth"]
+
+    if is_teacher:
+        st.subheader("👩‍🏫 [교사 전용] 우리 반 아이들의 비밀 편지 모아보기")
+        st.info(f"🔒 현재 **{active_class}** 반 담임선생님으로 로그인되어 있어, 우리 반 아이들이 보낸 비밀 편지만 안전하게 조회됩니다.")
+        
+        all_df = load_responses(active_class)
+        if not all_df.empty and "비밀편지여부" in all_df.columns:
+            # 비밀편지로 접수되었거나 하고싶은말이 있는 데이터 필터링
+            secret_df = all_df[(all_df["비밀편지여부"] == "비밀이에요!") | (all_df["하고싶은말"].str.contains("비밀", na=False))]
+            if not secret_df.empty:
+                st.success(f"📬 총 {len(secret_df)}통의 비밀 편지가 도착했습니다.")
+                for _, row in secret_df.iterrows():
+                    with st.expander(f"💌 [{row['survey_round']}] {row['이름']} 학생의 비밀 편지 ({row['제출일시'][:10]})"):
+                        st.write(f"- **보낸 일시:** {row['제출일시']}")
+                        st.write(f"- **마음 상태 (당시 날씨/기분):** {row['마음날씨']} / {row['현재기분']}")
+                        st.markdown(f"**💬 비밀 메시지 내용:**\n> {row['하고싶은말']}")
+            else:
+                st.info("📭 아직 도착한 비밀 편지가 없습니다.")
+        else:
+            st.info("📭 저장된 설문 데이터가 없습니다.")
+        
+        st.write("")
+        if st.button("🔒 교사 모드 로그아웃"):
+            st.session_state["is_teacher_auth"] = False
+            st.rerun()
+
+    else:
+        # 학생용 비밀 편지 작성 화면
+        if student_list:
+            st.subheader("👤 내 이름 고르기")
+            secret_me_display = st.selectbox(
+                "내 이름과 번호를 선택하세요 *",
+                options=["-- 내 이름을 선택하세요 --"] + student_display_list,
+                key="secret_name_select"
+            )
+
+            if secret_me_display != "-- 내 이름을 선택하세요 --":
+                my_secret_name = secret_me_display.split("번 ", 1)[1].split(" (")[0]
+
+                with st.form("secret_letter_form", clear_on_submit=True):
+                    st.write(f"**{my_secret_name}** 학생, 선생님에게 하고 싶은 비밀 이야기를 적어주세요.")
+                    secret_content = st.text_area(
+                        "🔒 비밀 편지 내용",
+                        placeholder="예: 요즘 친구 때문에 속상한 일이 있어요... / 선생님과 따로 이야기하고 싶어요.",
+                        height=180
+                    )
+
+                    if st.form_submit_button("💌 선생님께 비밀 편지 보내기", type="primary", use_container_width=True):
+                        if secret_content.strip():
+                            record = {
+                                "class_code": active_class,
+                                "survey_round": st.session_state["active_round"],
+                                "이름": my_secret_name,
+                                "마음날씨": "비밀 편지함 접수",
+                                "현재기분": "-",
+                                "깊이있는마음": "-",
+                                "주요고민": "-",
+                                "짜증순간": "-",
+                                "필요한것": "-",
+                                "친한친구_1순위": "-", "친한친구_1순위_이유": "-",
+                                "친한친구_2순위": "-", "친한친구_2순위_이유": "-",
+                                "친한친구_3순위": "-", "친한친구_3순위_이유": "-",
+                                "자주노는친구": "-", "친해지고싶은친구": "-", "멀리있는친구": "-",
+                                "관계어려움": "-",
+                                "점수_즐거움": 4, "점수_힘든친구": 1, "점수_상담대상": 4,
+                                "비밀편지여부": "비밀이에요!",
+                                "하고싶은말": secret_content.strip(),
+                                "제출방식": "비밀편지함",
+                                "제출일시": datetime.now(KST).isoformat()
+                            }
+                            insert_responses([record])
+                            st.balloons()
+                            st.success("🔒 비밀 편지가 선생님께 안전하게 전달되었습니다. 힘내세요! ❤️")
+                        else:
+                            st.warning("⚠️ 편지 내용을 입력해주세요.")
+
+            st.divider()
+            with st.expander("🔑 [선생님 전용] 비밀 편지함 열람하기"):
+                st.markdown("선생님이시라면 좌측 사이드바 또는 아래에서 학급 비밀번호(PIN)를 입력하고 로그인해 주세요.")
+                pin_input = st.text_input("교사 PIN 입력", type="password", key="secret_page_pin")
+                if st.button("로그인 확인"):
+                    if t_info and pin_input == t_info["pin_code"]:
+                        st.session_state["is_teacher_auth"] = True
+                        st.success("로그인 성공!")
+                        st.rerun()
+                    else:
+                        st.error("비밀번호가 틀렸습니다.")
+        else:
+            st.warning("⚠️ 등록된 학생 명렬표가 없습니다. [📋 4. 명렬표·회차·API 키 설정] 메뉴에서 먼저 명렬표를 등록해주세요.")
+
+# =========================================================
+# [모드 2] 종이 설문지 AI 스캔
 # =========================================================
 elif app_mode == "📸 2. 종이 설문지 AI 스캔 (교사용)":
     if require_teacher_auth():
@@ -618,6 +722,8 @@ elif app_mode == "📊 3. 통합 분석 & 변화 추적 (교사용)":
                 node_colors = []
                 node_sizes = []
                 in_degrees = dict(G.in_degree(weight='weight'))
+                out_degrees = dict(G.out_degree())
+                
                 for n in G.nodes():
                     gender = G.nodes[n].get("gender", "미기재")
                     if "남" in gender: node_colors.append("#3498DB")
@@ -637,10 +743,56 @@ elif app_mode == "📊 3. 통합 분석 & 변화 추적 (교사용)":
                 st.caption("🔵 파란색 노드: 남학생 | 핑크색 노드: 여학생 | 노드 크기: 받은 지목 가중치 반영")
 
                 st.divider()
-                st.subheader("📋 소시오그램 결과 요약")
+                st.subheader(f"📋 [{rel_type}] 소시오그램 결과 해석 및 학급 가이드")
+
                 sorted_in = sorted(in_degrees.items(), key=lambda x: x[1], reverse=True)
-                top_students = [f"**{k}**({v}점)" for k, v in sorted_in if v > 0][:5]
-                st.success("🌟 **교우관계 중심 학생 (인기/추천 리더):** " + (", ".join(top_students) if top_students else "데이터 없음"))
+                max_in = sorted_in[0][1] if sorted_in else 0
+                top_students = [f"**{k}**({v}점)" for k, v in sorted_in if v > 0 and v >= max(2, max_in - 2)][:5]
+
+                mutual_pairs = []
+                visited_pairs = set()
+                for u, v in G.edges():
+                    if G.has_edge(v, u):
+                        pair = tuple(sorted([u, v]))
+                        if pair not in visited_pairs:
+                            visited_pairs.add(pair)
+                            mutual_pairs.append(f"**{pair[0]} ↔ {pair[1]}**")
+
+                completely_isolated = [n for n in G.nodes() if in_degrees.get(n, 0) == 0 and out_degrees.get(n, 0) == 0]
+                unselected_students = [n for n in G.nodes() if in_degrees.get(n, 0) == 0 and out_degrees.get(n, 0) > 0]
+
+                undirected_G = G.to_undirected()
+                clusters = [list(comp) for comp in nx.connected_components(undirected_G) if len(comp) >= 2]
+                clusters.sort(key=len, reverse=True)
+
+                col_i1, col_i2 = st.columns(2)
+                with col_i1:
+                    if "멀리 있는" in rel_type:
+                        st.error("🚨 **갈등 집중 학생 (어려운 친구로 많이 지목됨)**\n\n" + (", ".join(top_students) if top_students else "특정 학생에게 쏠린 갈등 지목이 없습니다."))
+                        st.warning("⚡ **상호 갈등 관계 (서로를 어렵다고 지목한 쌍)**\n\n" + (", ".join(mutual_pairs) if mutual_pairs else "쌍방 갈등 관계가 발견되지 않았습니다."))
+                    else:
+                        st.success("🌟 **교우관계 중심 학생 (인기·리더 그룹)**\n\n" + (", ".join(top_students) if top_students else "아직 뚜렷하게 지목이 집중된 학생이 없습니다."))
+                        st.info("🤝 **상호 지목 단짝 (서로를 지목한 쌍방 관계)**\n\n" + (", ".join(mutual_pairs) if mutual_pairs else "서로 맞지목한 단짝 쌍이 아직 없습니다."))
+
+                with col_i2:
+                    if "멀리 있는" in rel_type:
+                        st.info("💡 **교사 지도 팁 (갈등 관리)**\n\n상호 갈등 쌍이나 지목이 집중된 학생은 모둠 편성 및 자리 배치 시 물리적 거리를 조절하고, 개별 면담을 통해 오해나 불편 요인을 파악해 주세요.")
+                    else:
+                        iso_text = f"- **완전 고립 (주고받은 지목 없음):** {', '.join(completely_isolated) if completely_isolated else '없음'}\n"
+                        iso_text += f"- **짝사랑 지목 (친구를 적었으나 선택받지 못함):** {', '.join(unselected_students) if unselected_students else '없음'}"
+                        st.warning("🏝️ **관계 고립 및 세심한 관심 필요 학생**\n\n" + iso_text)
+
+                        if clusters:
+                            cluster_strs = [f"**그룹 {idx+1} ({len(c)}명):** {', '.join(c)}" for idx, c in enumerate(clusters[:4])]
+                            st.markdown("🏘️ **형성된 주요 교우 소그룹(무리) 현황**\n" + "\n".join([f"- {s}" for s in cluster_strs]))
+
+                if "멀리 있는" not in rel_type:
+                    st.markdown(
+                        f"> **💡 학급 경영 솔루션:** 현재 **{len(mutual_pairs)}쌍**의 상호 단짝이 형성되어 있으며, "
+                        f"피지목이 없는 관심 필요 학생은 총 **{len(completely_isolated) + len(unselected_students)}명**입니다. "
+                        f"모둠 활동 시 중심 학생({', '.join([k for k, v in sorted_in[:2] if v > 0]) or '리더 학생'})과 "
+                        f"고립 위험 학생을 자연스럽게 매칭하거나, '더 친해지고 싶은 친구' 탭의 데이터를 참고해 자리를 배치해 보세요."
+                    )
 
             with t3:
                 st.dataframe(df.sort_values(by="위기점수", ascending=False)[["관심단계", "이름", "마음날씨", "현재기분", "친한친구_가중피지목수", "비밀편지여부", "주요고민", "하고싶은말"]], use_container_width=True, hide_index=True)
@@ -707,7 +859,7 @@ elif app_mode == "📋 4. 명렬표·회차·API 키 설정 (교사용)":
         sample_r = pd.DataFrame({"student_no": [1, 2, 3], "name": ["김철수", "이영희", "박민수"], "gender": ["남", "여", "남"]})
         st.download_button("📥 명렬표 업로드용 엑셀 양식 다운로드", data=to_excel_bytes(sample_r), file_name="명렬표_업로드양식_성별포함.xlsx")
 
-        up_excel = st.file_uploader("작성된 명렬표 엑셀 파일 업로드 (.xlsx)", type=["xlsx"])
+        up_excel = st.file_uploader("작성된 학생 명렬표 엑셀 파일 업로드 (.xlsx)", type=["xlsx"])
         if up_excel is not None:
             up_df = pd.read_excel(up_excel)
             if "student_no" in up_df.columns and "name" in up_df.columns and "gender" in up_df.columns:

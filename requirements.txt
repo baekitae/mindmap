@@ -13,3 +13,4 @@ poppler-utils
 streamlit
 pandas
 PyMuPDF
+cryptography

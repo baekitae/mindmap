@@ -866,7 +866,7 @@ if ss.teacher_auth:
 # 8. 사이드바
 # =========================================================
 STUDENT_PAGES = ["📝 마음 설문 참여", "💌 선생님께 비밀 편지"]
-TEACHER_PAGES = ["📊 분석 대시보드", "📸 종이 설문 AI 스캔", "💌 비밀 편지함", "⚙️ 학급 설정"]
+TEACHER_PAGES = ["📊 분석 대시보드", "👀 학생 설문 미리보기", "📸 종이 설문 AI 스캔", "💌 비밀 편지함", "⚙️ 학급 설정"]
 
 with st.sidebar:
     st.markdown(
@@ -1006,7 +1006,9 @@ def checkbox_group(options, key_prefix, skip_word=None):
     return sel
 
 
-def page_student_survey():
+def page_student_survey(preview=False):
+    if preview:
+        st.info("👀 **미리보기 모드** — 학생에게 보이는 화면 그대로입니다. 여기서 제출해도 저장되지 않아요.")
     hero(f"{class_title(cls)} 마음 & 친구 이야기",
          "솔직한 마음을 적어주면 선생님이 더 잘 이해하고 도와줄게요. 모든 감정은 소중해요!", "🌈")
 
@@ -1134,6 +1136,9 @@ def page_student_survey():
 
         submitted = st.form_submit_button("💌 설문 제출하기", type="primary", use_container_width=True)
 
+    if submitted and preview:
+        st.success("미리보기 모드라 저장하지 않았어요. 학생 화면에서는 정상 제출됩니다.")
+        return
     if submitted:
         picked = [f for f in friends if f != "-- 선택하세요 --"]
         if len(picked) != len(set(picked)):
@@ -1822,6 +1827,7 @@ ROUTES = {
     "📸 종이 설문 AI 스캔": page_ocr,
     "💌 비밀 편지함": page_letters,
     "⚙️ 학급 설정": page_settings,
+    "👀 학생 설문 미리보기": lambda: page_student_survey(preview=True),
 }
 if page in TEACHER_PAGES and not ss.teacher_auth:
     page = STUDENT_PAGES[0]

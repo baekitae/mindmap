@@ -401,7 +401,7 @@ if app_mode == "👦 1. 학생용 설문 참여":
                 st.markdown("### 💌 [4부] 마음속 이야기")
                 happy_text = st.text_area("😊 가장 기뻤던 일이나 자랑거리", placeholder="예: 모둠 활동을 잘 해냈어요!", height=70)
                 free_text = st.text_area("❤️ 선생님이나 친구에게 하고 싶은 말", placeholder="어떤 내용이든 편하게 적어주세요.", height=90)
-                st.info("💡 **안내:** 선생님께 꼭 숨기고 싶은 비밀 이야기나 깊은 고민이 있다면, 좌측 메뉴의 **[🔒 5. 선생님과의 비밀 편지함]**을 이용해 주세요!")
+                st.info("💡 **안내:** 선생님한테만 몰래 말하고 싶은 비밀 이야기나 깊은 고민이 있다면, 좌측 메뉴의 **[🔒 5. 선생님과의 비밀 편지함]**을 이용해 주세요!")
 
                 if st.form_submit_button("💌 일반 설문 제출하기", type="primary", use_container_width=True):
                     if worry_etc.strip(): worries_sel.append(f"기타: {worry_etc.strip()}")

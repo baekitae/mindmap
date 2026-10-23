@@ -297,11 +297,18 @@ def verify_pin(pin: str, stored: str) -> bool:
 
 
 _fernet = None
-if Fernet and ENC_KEY:
+_enc_src = ENC_KEY
+if not _enc_src and SUPABASE_KEY:
+    # APP_ENCRYPTION_KEY를 따로 설정하지 않으면 서버 비밀값(SUPABASE_KEY)에서 암호화 키를 자동으로 만듦
+    import base64
+    _enc_src = base64.urlsafe_b64encode(hashlib.sha256(("maeum-v2-enc:" + SUPABASE_KEY).encode()).digest()).decode()
+if Fernet and _enc_src:
     try:
-        _fernet = Fernet(ENC_KEY.encode() if isinstance(ENC_KEY, str) else ENC_KEY)
+        _fernet = Fernet(_enc_src.encode() if isinstance(_enc_src, str) else _enc_src)
     except Exception:
         _fernet = None
+ENC_MISSING_MSG = ("암호화 기능을 쓸 수 없습니다. requirements.txt에 `cryptography`가 있는지 확인하고 앱을 다시 배포해 주세요"
+                   + ("" if Fernet else " (현재 cryptography 패키지가 설치되어 있지 않음)") + ".")
 
 
 def encrypt_text(s: str):
@@ -495,12 +502,14 @@ def save_roster(code: str, df: pd.DataFrame):
     return len(records)
 
 
-def load_student_pins(code: str) -> dict:
+def load_student_pins(code: str, raise_error=False) -> dict:
     """{이름: {pin_hash, pin_enc}} — 컬럼이 없으면(마이그레이션 전) 빈 dict"""
     try:
         res = db().table("student_roster").select("name, pin_hash, pin_enc").eq("class_code", code).execute()
         return {r["name"]: r for r in (res.data or [])}
     except Exception:
+        if raise_error:
+            raise
         return {}
 
 
@@ -895,6 +904,7 @@ for k, v in {
     "login_fail": 0, "lock_until": 0.0, "survey_nonce": 0, "letter_nonce": 0,
     "survey_done": None, "letter_done": False, "new_class_code": None,
     "student_name": None, "student_last": 0.0, "stu_fail": 0, "stu_lock": 0.0, "new_pins": {},
+    "pin_editor_nonce": 0, "pin_flash": "",
 }.items():
     if k not in ss:
         ss[k] = v
@@ -1897,12 +1907,30 @@ def page_student_pins_tab():
     if roster_df.empty:
         st.info("먼저 명렬표를 등록해 주세요.")
         return
-    pins = load_student_pins(CODE)
-    if not pins and not roster_df.empty:
-        st.error("학생 비밀번호 컬럼이 없습니다. schema.sql의 학생 비밀번호 부분을 Supabase에서 실행해 주세요.")
+    try:
+        pins = load_student_pins(CODE, raise_error=True)
+    except Exception as e:
+        st.error("학생 비밀번호 정보를 불러오지 못했습니다. Supabase SQL Editor에서 아래를 실행한 뒤 앱을 새로고침해 주세요.")
+        st.code("alter table student_roster add column if not exists pin_hash text;\n"
+                "alter table student_roster add column if not exists pin_enc  text;\n"
+                "notify pgrst, 'reload schema';", language="sql")
+        st.caption(f"오류 내용: {e}")
         return
+    if not pins:
+        st.warning("명렬표가 DB에서 조회되지 않습니다. 명렬표를 다시 등록하거나 SUPABASE_KEY가 service_role 키인지 확인해 주세요.")
+        return
+    if _fernet and ss.new_pins:
+        fix = {n: p for n, p in ss.new_pins.items()
+               if (pins.get(n) or {}).get("pin_hash") and not pins[n].get("pin_enc") and verify_pin(p, pins[n]["pin_hash"])}
+        for n, p in fix.items():
+            db().table("student_roster").update({"pin_enc": encrypt_text(p)}).eq("class_code", CODE).eq("name", n).execute()
+        if fix:
+            pins = load_student_pins(CODE)
     has = {n for n, v in pins.items() if v.get("pin_hash")}
     total = len(roster_df)
+    if ss.pin_flash:
+        st.success(ss.pin_flash)
+        ss.pin_flash = ""
 
     with st.container(border=True):
         st.markdown("#### 학생 로그인 비밀번호")
@@ -1913,7 +1941,7 @@ def page_student_pins_tab():
         st.caption(f"숫자 {STUDENT_PIN_LEN}자리 비밀번호를 한 번에 만들어 카드로 인쇄해 나눠 줄 수 있어요. "
                    "한 명이라도 발급되면 모든 학생이 비밀번호로 로그인해야 하니, 전체 발급을 권장합니다.")
         if _fernet is None:
-            st.warning("서버 암호화 키(APP_ENCRYPTION_KEY)가 없어 비밀번호는 **만든 직후에만** 볼 수 있어요. 바로 인쇄하거나 엑셀로 받아 두세요.")
+            st.warning(ENC_MISSING_MSG + " 그 전까지 비밀번호는 **만든 직후에만** 볼 수 있어요.")
         c1, c2, c3 = st.columns(3)
         with c1:
             confirm_all = st.checkbox("기존 비밀번호를 모두 바꿔도 좋아요", value=not has, key="pin_conf_all")
@@ -1955,11 +1983,43 @@ def page_student_pins_tab():
 
     with st.container(border=True):
         st.markdown("#### 비밀번호 목록")
+        st.caption(f"✏️ **직접 정하기** 칸에 숫자 {STUDENT_PIN_LEN}자리를 적고 저장하면 선생님이 정한 비밀번호로 바뀌어요. "
+                   "비워 둔 학생은 그대로 유지됩니다.")
         show = st.toggle("비밀번호 보기", value=False, help="학생들이 화면을 볼 수 있는 곳에서는 끄고 사용하세요.")
         view = table.copy()
         if not show:
             view["비밀번호"] = view["비밀번호"].apply(lambda v: "●" * STUDENT_PIN_LEN if v and v.isdigit() else v)
-        st.dataframe(view, use_container_width=True, hide_index=True, height=360)
+        view["직접 정하기"] = ""
+        edited = st.data_editor(
+            view, use_container_width=True, hide_index=True, height=380,
+            key=f"pin_editor_{ss.pin_editor_nonce}",
+            disabled=["번호", "이름", "비밀번호", "상태"],
+            column_config={"직접 정하기": st.column_config.TextColumn(
+                "✏️ 직접 정하기", max_chars=STUDENT_PIN_LEN, validate=rf"^\d{{{STUDENT_PIN_LEN}}}$",
+                help=f"숫자 {STUDENT_PIN_LEN}자리")},
+        )
+        if st.button("💾 직접 정한 비밀번호 저장", type="primary"):
+            manual, bad = {}, []
+            for _, r in edited.iterrows():
+                v = r["직접 정하기"]
+                v = "" if v is None or (isinstance(v, float) and pd.isna(v)) else str(v).strip()
+                if not v:
+                    continue
+                if v.isdigit() and len(v) == STUDENT_PIN_LEN:
+                    manual[r["이름"]] = v
+                else:
+                    bad.append(r["이름"])
+            if bad:
+                st.error(f"숫자 {STUDENT_PIN_LEN}자리가 아닌 칸이 있어요: {', '.join(bad)}")
+            elif not manual:
+                st.info("직접 정하기 칸에 입력된 비밀번호가 없어요.")
+            else:
+                with st.spinner("저장 중..."):
+                    set_student_pins(CODE, manual)
+                ss.new_pins = {**ss.new_pins, **manual}
+                ss.pin_editor_nonce += 1
+                ss.pin_flash = f"✅ {len(manual)}명의 비밀번호를 선생님이 정한 번호로 바꿨어요."
+                st.rerun()
 
         printable = [(row["번호"], row["이름"], row["비밀번호"]) for _, row in table.iterrows() if str(row["비밀번호"]).isdigit()]
         link = f"{APP_BASE_URL.rstrip('/')}/?class={CODE}" if APP_BASE_URL else ""
@@ -2083,8 +2143,7 @@ def page_settings():
             has_key = bool(get_api_key(CODE))
             st.markdown(badge("등록됨", "ok") if has_key else badge("미등록", "muted"), unsafe_allow_html=True)
             if _fernet is None:
-                st.warning("서버에 암호화 키(APP_ENCRYPTION_KEY)가 설정되지 않아 API 키를 저장할 수 없습니다. "
-                           "AI 스캔 화면에서 세션 동안만 입력해 사용하세요.")
+                st.warning(ENC_MISSING_MSG + " 그 전까지는 AI 스캔 화면에서 세션 동안만 입력해 사용하세요.")
             else:
                 new_key = st.text_input("새 API 키", type="password", placeholder="저장된 키는 보안상 다시 표시되지 않아요")
                 c1, c2 = st.columns(2)
